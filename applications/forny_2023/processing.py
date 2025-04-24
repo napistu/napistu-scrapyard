@@ -2,14 +2,15 @@
 This module contains functions for data normalization and transformation.
 """
 
-from typing import Optional
+from copy import deepcopy
+from typing import Tuple, List, Dict, Union, Optional
 import warnings
+
 import numpy as np
 import scipy.sparse as sp
 from anndata import AnnData
-from typing import Tuple, List, Dict, Union
+
 import matplotlib.pyplot as plt
-from copy import deepcopy
 
 
 def plot_feature_counts_histogram(

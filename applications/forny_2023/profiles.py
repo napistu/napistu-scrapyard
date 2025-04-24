@@ -3,6 +3,7 @@ This module contains functions for regression and factor analysis.
 """
 
 from joblib import Parallel, delayed
+import os
 from typing import List, Optional, Tuple, Dict, Union, Any
 
 from anndata import AnnData
@@ -12,13 +13,14 @@ import matplotlib.pyplot as plt
 from mudata import MuData
 import seaborn as sns
 import scipy.sparse as sp
+from scipy.stats import kstest
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
 
 def apply_regression_per_feature(
     adata: AnnData,
     formula: str,
-    covariates_df: Optional[pd.DataFrame] = None,
     layer: Optional[str] = None,
     n_jobs: int = -1,
     batch_size: int = 100,
@@ -26,17 +28,16 @@ def apply_regression_per_feature(
 ) -> pd.DataFrame:
     """
     Apply linear regression to each feature in an AnnData object and return statistics.
-    Supports parallel processing across multiple cores using joblib.
+    This simplified version only supports direct regression against specified factors
+    without additional covariates from obs.
     
     Parameters
     ----------
     adata : anndata.AnnData
         The annotated data matrix.
     formula : str
-        Formula for regression in patsy format (e.g., '~ batch + n_counts').
+        Formula for regression in patsy format (e.g., '~ batch').
         Don't include the dependent variable, as each feature will be used.
-    covariates_df : Optional[pd.DataFrame], optional
-        DataFrame containing covariates. If None, uses adata.obs.
     layer : Optional[str], optional
         If provided, use this layer instead of X. The layer can be a string referring
         to a layer in adata.layers, or a key in adata.obsm for alternative feature matrices.
@@ -52,10 +53,6 @@ def apply_regression_per_feature(
     pd.DataFrame
         DataFrame with regression statistics for each feature.
     """
-    # Set up covariates
-    if covariates_df is None:
-        covariates_df = adata.obs.copy()
-    
     # Get feature names based on data source
     if layer is None:
         feature_names = adata.var_names
@@ -94,6 +91,24 @@ def apply_regression_per_feature(
         else:
             raise ValueError(f"Unsupported data type for obsm['{layer}']")
     
+    # Parse variables from formula
+    # Formula should be in the format "~ var1 + var2 + ..."
+    if not formula.startswith('~'):
+        raise ValueError("Formula must start with '~'")
+    
+    formula_vars = [var.strip() for var in formula[1:].split('+')]
+    formula_vars = [var for var in formula_vars if var]  # Remove empty strings
+    
+    if not formula_vars:
+        raise ValueError("No variables found in formula")
+    
+    # Extract variables from adata.obs
+    formula_data = {}
+    for var in formula_vars:
+        if var not in adata.obs.columns:
+            raise ValueError(f"Variable '{var}' not found in adata.obs")
+        formula_data[var] = adata.obs[var].values
+    
     # Define a function to process a single feature
     def process_feature(i: int) -> List[Dict[str, Any]]:
         feature_name = feature_names[i]
@@ -103,35 +118,79 @@ def apply_regression_per_feature(
         if np.var(y) == 0:
             return []
         
-        # Create temporary dataframe with feature and covariates
-        temp_df = covariates_df.copy()
-        temp_df["y"] = y
-        
         feature_results: List[Dict[str, Any]] = []
         
         try:
-            # Full formula with the feature as dependent variable
-            full_formula = "y " + formula
-            model = sm.formula.ols(formula=full_formula, data=temp_df)
-            result = model.fit()
-            
-            # Extract statistics for each coefficient
-            for coef_name in result.params.index:
-                if coef_name == "Intercept":
-                    continue  # Skip intercept
+            # Create design matrix manually for each variable in formula
+            for var_name in formula_vars:
+                var_values = formula_data[var_name]
                 
-                feature_results.append(
-                    {
-                        "feature": feature_name,
-                        "coefficient": coef_name,
-                        "estimate": result.params[coef_name],
-                        "std_err": result.bse[coef_name],
-                        "statistic": result.tvalues[coef_name],
-                        "p_value": result.pvalues[coef_name],
-                        "conf_int_lower": result.conf_int().loc[coef_name, 0],
-                        "conf_int_upper": result.conf_int().loc[coef_name, 1],
-                    }
-                )
+                # For categorical variables, create dummy variables
+                if pd.api.types.is_categorical_dtype(adata.obs[var_name]):
+                    categories = adata.obs[var_name].cat.categories
+                    
+                    # Skip if there's only one category
+                    if len(categories) <= 1:
+                        continue
+                    
+                    # For each category, perform a separate regression
+                    for cat in categories[1:]:  # Skip first category as reference
+                        # Create dummy variable (1 if category matches, 0 otherwise)
+                        dummy = (var_values == cat).astype(float)
+                        
+                        # Skip if dummy has no variation
+                        if np.var(dummy) == 0:
+                            continue
+                        
+                        # Simple linear regression: y = b0 + b1*x
+                        X = sm.add_constant(dummy)
+                        model = sm.OLS(y, X)
+                        result = model.fit()
+                        
+                        # Extract confidence intervals - FIX: access by index, not .loc
+                        conf_ints = result.conf_int()
+                        conf_lower = conf_ints[0][1]  # [0][1] for lower bound of coefficient
+                        conf_upper = conf_ints[1][1]  # [1][1] for upper bound of coefficient
+                        
+                        # Store results only for the coefficient (not intercept)
+                        coef_name = f"{var_name}_{cat}"
+                        feature_results.append(
+                            {
+                                "feature": feature_name,
+                                "coefficient": coef_name,
+                                "estimate": result.params[1],  # Skip intercept
+                                "std_err": result.bse[1],
+                                "statistic": result.tvalues[1],
+                                "p_value": result.pvalues[1],
+                                "conf_int_lower": conf_lower,
+                                "conf_int_upper": conf_upper,
+                            }
+                        )
+                # For continuous variables, perform simple regression
+                else:
+                    # Simple linear regression: y = b0 + b1*x
+                    X = sm.add_constant(var_values)
+                    model = sm.OLS(y, X)
+                    result = model.fit()
+                    
+                    # Extract confidence intervals - FIX: access by index, not .loc
+                    conf_ints = result.conf_int()
+                    conf_lower = conf_ints[0][1]  # [0][1] for lower bound of coefficient
+                    conf_upper = conf_ints[1][1]  # [1][1] for upper bound of coefficient
+                    
+                    # Store results only for the coefficient (not intercept)
+                    feature_results.append(
+                        {
+                            "feature": feature_name,
+                            "coefficient": var_name,
+                            "estimate": result.params[1],  # Skip intercept
+                            "std_err": result.bse[1],
+                            "statistic": result.tvalues[1],
+                            "p_value": result.pvalues[1],
+                            "conf_int_lower": conf_lower,
+                            "conf_int_upper": conf_upper,
+                        }
+                    )
         except Exception as e:
             print(f"Error in feature {feature_name}: {str(e)}")
         
