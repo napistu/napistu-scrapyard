@@ -3,6 +3,8 @@ import pandas as pd
 from utils import _drop_extra_cols
 from utils import resolve_matches
 from utils import _aggregate_numeric_columns
+from utils import features_to_pathway_species
+    
 
 def test_drop_extra_cols():
     """Test the _drop_extra_cols function for removing and reordering columns."""
@@ -231,3 +233,63 @@ def test_aggregate_numeric_edge_cases():
     EXPECTED_VALUE_2 = 10.0 * 0.5 + 20.0 * 0.25 + 30.0 * 0.25  # = 17.5
     assert abs(result_multi["value1"] - EXPECTED_VALUE_1) < 0.01
     assert abs(result_multi["value2"] - EXPECTED_VALUE_2) < 0.01
+
+def test_features_to_pathway_species_basic_and_expansion():
+    
+    import pandas as pd
+    # Mock species_identifiers table
+    species_identifiers = pd.DataFrame({
+        "ontology": ["chebi", "chebi", "uniprot", "uniprot"],
+        "identifier": ["A", "B", "X", "Y"],
+        "s_id": [1, 2, 3, 4],
+        "s_name": ["foo", "bar", "baz", "qux"],
+        "bqb": ["BQB_IS", "BQB_IS", "BQB_IS", "BQB_IS"]
+    })
+    # Basic: no expansion, single identifier per row
+    features = pd.DataFrame({
+        "my_id": ["A", "B", "X"],
+        "other_col": [10, 20, 30]
+    })
+    result = features_to_pathway_species(
+        feature_identifiers=features,
+        species_identifiers=species_identifiers,
+        ontologies={"chebi", "uniprot"},
+        feature_identifiers_var="my_id",
+        expand_identifiers=False
+    )
+    # Should map all three
+    assert set(result["my_id"]) == {"A", "B", "X"}
+    assert set(result["identifier"]) == {"A", "B", "X"}
+    assert set(result["s_name"]) == {"foo", "bar", "baz"}
+    # Expansion: one row with multiple IDs
+    features2 = pd.DataFrame({
+        "my_id": ["A / B / X", "Y"],
+        "other_col": [100, 200]
+    })
+    result2 = features_to_pathway_species(
+        feature_identifiers=features2,
+        species_identifiers=species_identifiers,
+        ontologies={"chebi", "uniprot"},
+        feature_identifiers_var="my_id",
+        expand_identifiers=True,
+        identifier_delimiter="/"
+    )
+    # Should expand to 4 rows (A, B, X, Y)
+    assert set(result2["identifier"]) == {"A", "B", "X", "Y"}
+    assert set(result2["s_name"]) == {"foo", "bar", "baz", "qux"}
+    # Whitespace trimming
+    features3 = pd.DataFrame({
+        "my_id": ["  A  /  B  /X  ", " Y"],
+        "other_col": [1, 2]
+    })
+    result3 = features_to_pathway_species(
+        feature_identifiers=features3,
+        species_identifiers=species_identifiers,
+        ontologies={"chebi", "uniprot"},
+        feature_identifiers_var="my_id",
+        expand_identifiers=True,
+        identifier_delimiter="/"
+    )
+    # Should expand and trim whitespace
+    assert set(result3["identifier"]) == {"A", "B", "X", "Y"}
+    assert set(result3["s_name"]) == {"foo", "bar", "baz", "qux"}
