@@ -1,302 +1,287 @@
-"""
-Utility functions for data manipulation and analysis.
-"""
-
-import logging
-from typing import Dict, List, Optional, Set, Union
-
 import pandas as pd
+import pytest
+import numpy as np
+from datetime import datetime
 
-from napistu import mechanism_matching
-from napistu.constants import ONTOLOGIES_LIST
+def _drop_extra_cols(
+    df_in : pd.DataFrame,
+    df_out : pd.DataFrame
+    ) -> pd.DataFrame:
+    """Remove columns in df_out that are not in df_in and order columns based on df_in."""
 
-logger = logging.getLogger(__name__)
+    retained_cols = df_in.columns.intersection(df_out.columns)
+    df_out = df_out.loc[:, retained_cols]
+    return df_out
 
-
-def _validate_wide_ontologies(
-    wide_df: pd.DataFrame,
-    ontologies: Optional[Union[str, Set[str], Dict[str, str]]] = None
-) -> Set[str]:
+def get_numeric_aggregator(method: str = "weighted_mean", feature_id_var: str = "feature_id") -> callable:
     """
-    Validate ontology specifications against the wide DataFrame and ONTOLOGIES_LIST.
+    Get aggregation function for numeric columns with various methods.
     
     Parameters
     ----------
-    wide_df : pd.DataFrame
-        DataFrame with one column per ontology and a results column
-    ontologies : Optional[Union[str, Set[str], Dict[str, str]]]
-        Either:
-        - String specifying a single ontology column
-        - Set of columns to treat as ontologies
-        - Dict mapping wide column names to ontology names
-        - None to automatically detect ontology columns based on ONTOLOGIES_LIST
+    method : str, default="weighted_mean"
+        Aggregation method to use:
+        - "weighted_mean": weighted by inverse of feature_id frequency (default)
+        - "mean": simple arithmetic mean
+        - "first": first value after sorting by feature_id_var (requires feature_id_var)
+        - "max": maximum value
+    feature_id_var : str, default="feature_id"
+        Name of the identifier column for sorting and weighting
         
     Returns
     -------
-    Set[str]
-        Set of validated ontology names. For dictionary mappings, returns the target ontology names.
+    callable
+        Aggregation function to use with groupby
         
     Raises
     ------
     ValueError
-        If validation fails for any ontology specification or no valid ontologies are found
+        If method="first" and feature_id_var is not in DataFrame
     """
-    # Convert string input to set
-    if isinstance(ontologies, str):
-        ontologies = {ontologies}
+    def weighted_mean(series: pd.Series) -> float:
+        # During groupby aggregation, series.index is the original DataFrame index
+        # and series.name is the column name. We can use this to get feature_ids
+        parent_df = series.index.to_frame()
+        
+        # If feature_id_var not in parent DataFrame, fall back to mean
+        if feature_id_var not in parent_df.columns:
+            return series.mean()
+            
+        # Count occurrences of each feature_id in the entire original DataFrame
+        feature_counts = parent_df[feature_id_var].value_counts()
+        
+        # Calculate weights as 1/N where N is the count of each feature_id
+        weights = 1 / feature_counts[parent_df[feature_id_var]].values
+        
+        # Normalize weights to sum to 1
+        weights = weights / weights.sum()
+        
+        # Calculate weighted mean using original values and normalized weights
+        return (series.values * weights).sum()
+    
+    def first_by_id(series: pd.Series) -> float:
+        # Sort by feature_id_var and take first value
+        df = series.reset_index()
+        # Require feature_id_var for first method
+        if feature_id_var not in df.columns:
+            raise ValueError(
+                f"Column '{feature_id_var}' not found in DataFrame. "
+                f"This column is required when using method='first'"
+            )
+        return df.sort_values(feature_id_var).iloc[0][series.name]
+    
+    aggregators = {
+        "weighted_mean": weighted_mean,
+        "mean": "mean",  # Use pandas built-in mean
+        "first": first_by_id,
+        "max": "max"     # Use pandas built-in max
+    }
+    
+    if method not in aggregators:
+        raise ValueError(f"Unknown aggregation method: {method}. Must be one of {list(aggregators.keys())}")
+    
+    return aggregators[method]
 
-    # Get the set of ontology columns
-    if isinstance(ontologies, dict):
-        # Check source columns exist in DataFrame
-        missing_cols = set(ontologies.keys()) - set(wide_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Source columns not found in DataFrame: {missing_cols}"
-            )
-        # Validate target ontologies against ONTOLOGIES_LIST
-        invalid_onts = set(ontologies.values()) - set(ONTOLOGIES_LIST)
-        if invalid_onts:
-            raise ValueError(
-                f"Invalid ontologies in mapping: {invalid_onts}. Must be one of: {ONTOLOGIES_LIST}"
-            )
-        # Return target ontology names instead of source column names
-        ontology_cols = set(ontologies.values())
+def _aggregate_numeric_columns(
+    df: pd.DataFrame, 
+    numeric_cols: list[str], 
+    method: str = "weighted_mean", 
+    feature_id_var: str = "feature_id"
+) -> pd.Series:
+    """
+    Aggregate numeric columns with specified method.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing data to aggregate
+    numeric_cols : list
+        List of numeric column names to aggregate
+    method : str, default="weighted_mean"
+        Aggregation method to use
+    feature_id_var : str, default="feature_id"
+        Name of the identifier column for weighting
         
-    elif isinstance(ontologies, set):
-        # Check specified columns exist in DataFrame
-        missing_cols = ontologies - set(wide_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Specified ontology columns not found in DataFrame: {missing_cols}"
-            )
-        # Validate specified ontologies against ONTOLOGIES_LIST
-        invalid_onts = ontologies - set(ONTOLOGIES_LIST)
-        if invalid_onts:
-            raise ValueError(
-                f"Invalid ontologies in set: {invalid_onts}. Must be one of: {ONTOLOGIES_LIST}"
-            )
-        ontology_cols = ontologies
+    Returns
+    -------
+    pd.Series
+        Series with aggregated values for each numeric column
+    """
+    if method != "weighted_mean":
+        # Use simple aggregation for non-weighted methods
+        return df[numeric_cols].agg(method)
         
+    # For weighted mean, calculate weights based on feature_id frequency
+    feature_counts = df[feature_id_var].value_counts()
+    weights = 1 / feature_counts[df[feature_id_var]].values
+    weights = weights / weights.sum()
+    
+    # Calculate weighted mean for each numeric column
+    result = pd.Series(index=numeric_cols, dtype=float)
+    for col in numeric_cols:
+        result[col] = (df[col].values * weights).sum()
+    
+    return result
+
+def test_resolve_matches_missing_id():
+    """Test that resolve_matches raises an error when id_col is missing."""
+    # Setup data without feature_id column
+    data_no_id = pd.DataFrame({
+        "s_id": ["s_id_1", "s_id_1", "s_id_2"],
+        "results_a": [1, 2, 3],
+        "results_b": ["foo", "bar", "baz"]
+    })
+    
+    # Should raise KeyError when trying to use weighted mean
+    with pytest.raises(KeyError, match="feature_id"):
+        resolve_matches(data_no_id, numeric_agg="weighted_mean")
+    
+    # Should work fine with other aggregation methods
+    result = resolve_matches(data_no_id, numeric_agg="mean")
+    assert result.loc["s_id_1", "results_a"] == 1.5  # (1 + 2) / 2
+    assert result.loc["s_id_1", "results_b"] == "bar,foo"
+
+def test_resolve_matches_invalid_dtypes():
+    """Test that resolve_matches raises an error for unsupported dtypes."""
+    # Setup data with boolean and datetime columns
+    data = pd.DataFrame({
+        "feature_id": ["A", "B", "B", "C"],
+        "bool_col": [True, False, True, False],
+        "datetime_col": [
+            datetime(2024, 1, 1),
+            datetime(2024, 1, 2),
+            datetime(2024, 1, 3),
+            datetime(2024, 1, 4)
+        ],
+        "s_id": ["s1", "s1", "s2", "s2"]
+    })
+    
+    # Should raise TypeError for unsupported dtypes
+    with pytest.raises(TypeError, match="Unsupported data types"):
+        resolve_matches(data)
+
+def resolve_matches(
+    matched_data: pd.DataFrame, 
+    feature_id_var: str = "feature_id", 
+    index_col: str = "s_id",
+    numeric_agg: str = "weighted_mean",
+    keep_id_col: bool = True
+) -> pd.DataFrame:
+    """
+    Resolve many-to-1 and 1-to-many matches in matched data.
+    
+    Parameters
+    ----------
+    matched_data : pd.DataFrame
+        DataFrame containing matched data with columns:
+        - feature_id_var: identifier column (e.g. feature_id)
+        - index_col: index column (e.g. s_id)
+        - other columns: data columns to be aggregated
+    feature_id_var : str, default="feature_id"
+        Name of the identifier column
+    index_col : str, default="s_id"
+        Name of the column to use as index
+    numeric_agg : str, default="weighted_mean"
+        Method to aggregate numeric columns:
+        - "weighted_mean": weighted by inverse of feature_id frequency (default)
+        - "mean": simple arithmetic mean
+        - "first": first value after sorting by feature_id_var (requires feature_id_var)
+        - "max": maximum value
+    keep_id_col : bool, default=True
+        Whether to keep and rollup the feature_id_var in the output.
+        If False, feature_id_var will be dropped from the output.
+        
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with resolved matches:
+        - Many-to-1: numeric columns are aggregated using specified method
+        - 1-to-many: adds a count column showing number of matches
+        - Index is set to index_col
+        
+    Raises
+    ------
+    KeyError
+        If feature_id_var is not present in the DataFrame and numeric_agg="weighted_mean"
+    TypeError
+        If DataFrame contains unsupported data types (boolean or datetime)
+    """
+    # Make a copy to avoid modifying input
+    df = matched_data.copy()
+    
+    # Check for unsupported dtypes
+    unsupported_dtypes = df.select_dtypes(include=['bool', 'datetime64']).columns
+    if not unsupported_dtypes.empty:
+        raise TypeError(
+            f"Unsupported data types found in columns: {list(unsupported_dtypes)}. "
+            "Boolean and datetime columns are not supported."
+        )
+    
+    # Check if feature_id_var exists when using weighted mean
+    if numeric_agg == "weighted_mean" and feature_id_var not in df.columns:
+        raise KeyError(
+            f"Column '{feature_id_var}' not found in DataFrame. "
+            f"This column is required when using numeric_agg='weighted_mean'"
+        )
+    
+    # Calculate global feature frequencies before setting index
+    if numeric_agg == "weighted_mean":
+        global_feature_counts = df[feature_id_var].value_counts()
+    
+    # Set index for grouping
+    df = df.set_index(index_col)
+    
+    # Split columns by type
+    numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns
+    non_numeric_cols = df.select_dtypes(exclude=['int64', 'float64']).columns
+    if not keep_id_col:
+        non_numeric_cols = non_numeric_cols.difference([feature_id_var])
+    
+    results = []
+    
+    # Handle non-numeric columns
+    if len(non_numeric_cols) > 0:
+        non_numeric_agg = df[non_numeric_cols].groupby(index_col).agg(
+            lambda x: ','.join(sorted(set(x.astype(str))))
+        )
+        results.append(non_numeric_agg)
+    
+    # Handle numeric columns
+    if len(numeric_cols) > 0:
+        numeric_results = {}
+        for group_idx, group_df in df.groupby(index_col):
+            if numeric_agg == "weighted_mean":
+                # Calculate weights based on global feature frequencies
+                weights = 1 / global_feature_counts[group_df[feature_id_var]].values
+                weights = weights / weights.sum()
+                
+                # Calculate weighted mean for each numeric column
+                group_result = pd.Series(index=numeric_cols, dtype=float)
+                for col in numeric_cols:
+                    group_result[col] = (group_df[col].values * weights).sum()
+            else:
+                # Use simple aggregation for non-weighted methods
+                group_result = group_df[numeric_cols].agg(numeric_agg)
+            
+            numeric_results[group_idx] = group_result
+        
+        # Convert numeric results to DataFrame with proper index
+        numeric_agg = pd.DataFrame.from_dict(numeric_results, orient='index')
+        results.append(numeric_agg)
+    
+    # Combine results
+    if results:
+        resolved = pd.concat(results, axis=1)
     else:
-        # Auto-detect ontology columns by matching against ONTOLOGIES_LIST
-        ontology_cols = set(wide_df.columns) & set(ONTOLOGIES_LIST)
-        if not ontology_cols:
-            raise ValueError(
-                f"No valid ontology columns found in DataFrame. Column names must match one of: {ONTOLOGIES_LIST}"
-            )
-        logger.info(
-            f"Auto-detected ontology columns: {ontology_cols}"
-        )
+        resolved = pd.DataFrame(index=df.index)
     
-    logger.debug(f"Validated ontology columns: {ontology_cols}")
-    return ontology_cols
-
-
-def match_features_to_wide_pathway_species(
-    wide_df: pd.DataFrame,
-    species_identifiers: pd.DataFrame,
-    ontologies: Optional[Union[Set[str], Dict[str, str]]] = None,
-    feature_id_var: str = "identifier"
-) -> pd.DataFrame:
-    """
-    Convert a wide-format DataFrame with multiple ontology columns to long format,
-    and match features to pathway species by ontology and identifier.
-
-    Parameters
-    ----------
-    wide_df : pd.DataFrame
-        DataFrame with ontology identifier columns and any number of results columns.
-        All non-ontology columns are treated as results.
-    species_identifiers : pd.DataFrame
-        DataFrame as required by features_to_pathway_species
-    ontologies : Optional[Union[Set[str], Dict[str, str]]], default=None
-        Either:
-        - Set of columns to treat as ontologies
-        - Dict mapping wide column names to ontology names
-        - None to automatically detect ontology columns based on ONTOLOGIES_LIST
-    feature_id_var : str, default="identifier"
-        Name for the identifier column in the long format
-
-    Returns
-    -------
-    pd.DataFrame
-        Output of match_by_ontology_and_identifier
-
-    Examples
-    --------
-    >>> # Example with auto-detected ontology columns and multiple results
-    >>> wide_df = pd.DataFrame({
-    ...     'uniprot': ['P12345', 'Q67890'],
-    ...     'chebi': ['15377', '16810'],
-    ...     'log2fc': [1.0, 2.0],
-    ...     'pvalue': [0.01, 0.05]
-    ... })
-    >>> result = match_features_to_wide_pathway_species(
-    ...     wide_df=wide_df,
-    ...     species_identifiers=species_identifiers
-    ... )
-
-    >>> # Example with custom ontology mapping
-    >>> wide_df = pd.DataFrame({
-    ...     'protein_id': ['P12345', 'Q67890'],
-    ...     'compound_id': ['15377', '16810'],
-    ...     'expression': [1.0, 2.0],
-    ...     'confidence': [0.8, 0.9]
-    ... })
-    >>> result = match_features_to_wide_pathway_species(
-    ...     wide_df=wide_df,
-    ...     species_identifiers=species_identifiers,
-    ...     ontologies={'protein_id': 'uniprot', 'compound_id': 'chebi'}
-    ... )
-    """
-    # Make a copy to avoid modifying the input
-    wide_df = wide_df.copy()
-
-    # Validate ontologies and get the set of ontology columns
-    ontology_cols = _validate_wide_ontologies(wide_df, ontologies)
-    melt_cols = list(ontology_cols)
-
-    # Apply renaming if a mapping is provided
-    if isinstance(ontologies, dict):
-        wide_df = wide_df.rename(columns=ontologies)
-
-    # All non-ontology columns are treated as results
-    results_cols = list(set(wide_df.columns) - set(melt_cols))
-    if not results_cols:
-        raise ValueError("No results columns found in DataFrame")
+    # Add count of matches per feature_id
+    if feature_id_var in df.columns:
+        match_counts = df.groupby(index_col)[feature_id_var].nunique()
+        resolved[f'{feature_id_var}_match_count'] = match_counts
     
-    logger.info(f"Using columns as results: {results_cols}")
-
-    # Melt ontology columns to long format, keeping all results columns
-    long_df = wide_df.melt(
-        id_vars=results_cols,
-        value_vars=melt_cols,
-        var_name="ontology",
-        value_name=feature_id_var
-    ).dropna(subset=[feature_id_var])    
-
-    logger.debug(f"Final long format shape: {long_df.shape}")
-
-    # Call the matching function with the validated ontologies
-    return match_by_ontology_and_identifier(
-        feature_identifiers=long_df,
-        species_identifiers=species_identifiers,
-        ontologies=ontology_cols,
-        feature_id_var=feature_id_var
-    )
-
-
-def match_by_ontology_and_identifier(
-    feature_identifiers: pd.DataFrame,
-    species_identifiers: pd.DataFrame,
-    ontologies: Union[str, Set[str], List[str]],
-    feature_id_var: str = "identifier",
-) -> pd.DataFrame:
-    """
-    Match features to pathway species based on both ontology and identifier matches.
-    Performs separate matching for each ontology and concatenates the results.
-
-    Parameters
-    ----------
-    feature_identifiers : pd.DataFrame
-        DataFrame containing feature identifiers and results.
-        Must have columns [ontology, feature_id_var, results]
-    species_identifiers : pd.DataFrame
-        DataFrame containing species identifiers from pathway.
-        Must have columns [ontology, identifier]
-    ontologies : Union[str, Set[str], List[str]]
-        Ontologies to match on. Can be:
-        - A single ontology string
-        - A set of ontology strings
-        - A list of ontology strings
-    feature_id_var : str, default="identifier"
-        Name of the identifier column in feature_identifiers
-
-    Returns
-    -------
-    pd.DataFrame
-        Concatenated results of matching for each ontology.
-        Contains all columns from features_to_pathway_species()
-
-    Examples
-    --------
-    >>> # Match using a single ontology
-    >>> result = match_by_ontology_and_identifier(
-    ...     feature_identifiers=features_df,
-    ...     species_identifiers=species_df,
-    ...     ontologies="uniprot"
-    ... )
-
-    >>> # Match using multiple ontologies
-    >>> result = match_by_ontology_and_identifier(
-    ...     feature_identifiers=features_df,
-    ...     species_identifiers=species_df,
-    ...     ontologies={"uniprot", "chebi"}
-    ... )
-    """
-    # Convert string to set for consistent handling
-    if isinstance(ontologies, str):
-        ontologies = {ontologies}
-    elif isinstance(ontologies, list):
-        ontologies = set(ontologies)
-
-    # Validate ontologies
-    invalid_onts = ontologies - set(ONTOLOGIES_LIST)
-    if invalid_onts:
-        raise ValueError(
-            f"Invalid ontologies specified: {invalid_onts}. Must be one of: {ONTOLOGIES_LIST}"
-        )
-
-    # Initialize list to store results
-    matched_dfs = []
-
-    # Process each ontology separately
-    for ont in ontologies:
-        # Filter feature identifiers to current ontology and drop ontology column
-        ont_features = feature_identifiers[
-            feature_identifiers["ontology"] == ont
-        ].drop(columns=["ontology"]).copy()
-
-        if ont_features.empty:
-            logger.warning(f"No features found for ontology: {ont}")
-            continue
-
-        # Filter species identifiers to current ontology
-        ont_species = species_identifiers[
-            species_identifiers["ontology"] == ont
-        ].copy()
-
-        if ont_species.empty:
-            logger.warning(f"No species found for ontology: {ont}")
-            continue
-
-        logger.debug(
-            f"Matching {len(ont_features)} features to {len(ont_species)} species for ontology {ont}"
-        )
-
-        # Match features to species for this ontology
-        matched = mechanism_matching.features_to_pathway_species(
-            feature_identifiers=ont_features,
-            species_identifiers=ont_species,
-            ontologies={ont},
-            feature_id_var=feature_id_var
-        )
-
-        if matched.empty:
-            logger.warning(f"No matches found for ontology: {ont}")
-            continue
-
-        matched_dfs.append(matched)
-
-    if not matched_dfs:
-        logger.warning("No matches found for any ontology")
-        return pd.DataFrame()  # Return empty DataFrame with correct columns
-
-    # Combine results from all ontologies
-    result = pd.concat(matched_dfs, axis=0, ignore_index=True)
+    # Drop feature_id_var if not keeping it
+    if not keep_id_col and feature_id_var in resolved.columns:
+        resolved = resolved.drop(columns=[feature_id_var])
     
-    logger.info(
-        f"Found {len(result)} total matches across {len(matched_dfs)} ontologies"
-    )
-    
-    return result 
+    return resolved
