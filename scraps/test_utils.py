@@ -1,10 +1,15 @@
 import pandas as pd
+import pytest
+from datetime import datetime
 
 from utils import _drop_extra_cols
 from utils import resolve_matches
-from utils import _aggregate_numeric_columns
-from utils import features_to_pathway_species
-    
+
+from utils import RESOLVE_MATCHES_AGGREGATORS
+from utils import FEATURE_ID_VAR_DEFAULT
+
+from napistu.constants import SBML_DFS
+
 
 def test_drop_extra_cols():
     """Test the _drop_extra_cols function for removing and reordering columns."""
@@ -64,25 +69,34 @@ def test_resolve_matches_with_example_data():
     """Test resolve_matches function with example data for all aggregation methods."""
     # Setup example data with overlapping 1-to-many and many-to-1 cases
     example_data = pd.DataFrame({
-        "feature_id": ["A", "B", "C", "D", "D", "E", "B", "B", "C"],
-        "s_id": ["s_id_1", "s_id_1", "s_id_1", "s_id_4", "s_id_5", "s_id_6", "s_id_2", "s_id_3", "s_id_3"],
+        FEATURE_ID_VAR_DEFAULT: ["A", "B", "C", "D", "D", "E", "B", "B", "C"],
+        SBML_DFS.S_ID: ["s_id_1", "s_id_1", "s_id_1", "s_id_4", "s_id_5", "s_id_6", "s_id_2", "s_id_3", "s_id_3"],
         "results_a": [1, 2, 3, 0.4, 5, 6, 0.7, 0.8, 9],
         "results_b": ["foo", "foo", "bar", "bar", "baz", "baz", "not", "not", "not"]
     })
     
+    # Test that missing feature_id raises KeyError
+    data_no_id = pd.DataFrame({
+        SBML_DFS.S_ID: ["s_id_1", "s_id_1", "s_id_2"],
+        "results_a": [1, 2, 3],
+        "results_b": ["foo", "bar", "baz"]
+    })
+    with pytest.raises(KeyError, match=FEATURE_ID_VAR_DEFAULT):
+        resolve_matches(data_no_id)
+    
     # Test with keep_id_col=True (default)
-    result_with_id = resolve_matches(example_data, keep_id_col=True, numeric_agg="mean")
+    result_with_id = resolve_matches(example_data, keep_id_col=True, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.MEAN)
     
     # Verify feature_id column is present and correctly aggregated
-    assert "feature_id" in result_with_id.columns
-    assert result_with_id.loc["s_id_1", "feature_id"] == "A,B,C"
-    assert result_with_id.loc["s_id_3", "feature_id"] == "B,C"
+    assert FEATURE_ID_VAR_DEFAULT in result_with_id.columns
+    assert result_with_id.loc["s_id_1", FEATURE_ID_VAR_DEFAULT] == "A,B,C"
+    assert result_with_id.loc["s_id_3", FEATURE_ID_VAR_DEFAULT] == "B,C"
     
     # Test with keep_id_col=False
-    result_without_id = resolve_matches(example_data, keep_id_col=False, numeric_agg="mean")
+    result_without_id = resolve_matches(example_data, keep_id_col=False, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.MEAN)
     
     # Verify feature_id column is not in output
-    assert "feature_id" not in result_without_id.columns
+    assert FEATURE_ID_VAR_DEFAULT not in result_without_id.columns
     
     # Verify other columns are still present and correctly aggregated
     assert "results_a" in result_without_id.columns
@@ -101,8 +115,18 @@ def test_resolve_matches_with_example_data():
     assert result_without_id.loc["s_id_1", "feature_id_match_count"] == 3
     assert result_without_id.loc["s_id_3", "feature_id_match_count"] == 2
     
+    # Test maximum aggregation
+    max_result = resolve_matches(example_data, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.MAX)
+    
+    # Verify maximum values are correct
+    assert max_result.loc["s_id_1", "results_a"] == 3.0  # max of [1, 2, 3]
+    assert max_result.loc["s_id_3", "results_a"] == 9.0  # max of [0.8, 9]
+    assert max_result.loc["s_id_4", "results_a"] == 0.4  # single value
+    assert max_result.loc["s_id_5", "results_a"] == 5.0  # single value
+    assert max_result.loc["s_id_6", "results_a"] == 6.0  # single value
+    
     # Test weighted mean (feature_id is used for weights regardless of keep_id_col)
-    weighted_result = resolve_matches(example_data, numeric_agg="weighted_mean", keep_id_col=True)
+    weighted_result = resolve_matches(example_data, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.WEIGHTED_MEAN, keep_id_col=True)
     
     # For s_id_1:
     # A appears once in total (weight = 1/1)
@@ -133,7 +157,7 @@ def test_resolve_matches_with_example_data():
         f"s_id_3 weighted mean: expected {expected_weighted_mean_3:.3f}, but got {actual_weighted_mean_3:.3f}"
     
     # Test weighted mean with keep_id_col=False (weights still use feature_id)
-    weighted_result_no_id = resolve_matches(example_data, numeric_agg="weighted_mean", keep_id_col=False)
+    weighted_result_no_id = resolve_matches(example_data, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.WEIGHTED_MEAN, keep_id_col=False)
     
     # Verify weighted means are the same regardless of keep_id_col
     assert abs(weighted_result_no_id.loc["s_id_1", "results_a"] - expected_weighted_mean_1) < 0.01, \
@@ -142,154 +166,54 @@ def test_resolve_matches_with_example_data():
         "Weighted mean should be the same regardless of keep_id_col"
     
     # Test that both versions preserve the same index structure
-    expected_index = pd.Index(["s_id_1", "s_id_2", "s_id_3", "s_id_4", "s_id_5", "s_id_6"])
+    expected_index = pd.Index(["s_id_1", "s_id_2", "s_id_3", "s_id_4", "s_id_5", "s_id_6"], name="s_id")
     pd.testing.assert_index_equal(result_with_id.index, expected_index)
     pd.testing.assert_index_equal(result_without_id.index, expected_index)
 
-def test_aggregate_numeric_basic():
-    """Test basic aggregation methods in _aggregate_numeric_columns."""
-    # Setup simple test data
-    df = pd.DataFrame({
-        "feature_id": ["A", "B", "B", "C"],
-        "value1": [1.0, 2.0, 3.0, 4.0],
-        "value2": [10.0, 20.0, 30.0, 40.0]
-    })
-    numeric_cols = ["value1", "value2"]
-    
-    # Test mean
-    result_mean = _aggregate_numeric_columns(df, numeric_cols, method="mean")
-    assert result_mean["value1"] == 2.5  # (1 + 2 + 3 + 4) / 4
-    assert result_mean["value2"] == 25.0  # (10 + 20 + 30 + 40) / 4
-    
-    # Test max
-    result_max = _aggregate_numeric_columns(df, numeric_cols, method="max")
-    assert result_max["value1"] == 4.0
-    assert result_max["value2"] == 40.0
 
-def test_aggregate_numeric_weighted_mean():
-    """Test weighted mean calculation in _aggregate_numeric_columns."""
-    # Setup test data with known feature frequencies
-    df = pd.DataFrame({
-        "feature_id": ["A", "B", "B", "C"],  # B appears twice
-        "value": [100.0, 1.0, 2.0, 200.0]
+def test_resolve_matches_invalid_dtypes():
+    """Test that resolve_matches raises an error for unsupported dtypes."""
+    # Setup data with boolean and datetime columns
+    data = pd.DataFrame({
+        FEATURE_ID_VAR_DEFAULT: ["A", "B", "B", "C"],
+        "bool_col": [True, False, True, False],
+        "datetime_col": [
+            datetime(2024, 1, 1),
+            datetime(2024, 1, 2),
+            datetime(2024, 1, 3),
+            datetime(2024, 1, 4)
+        ],
+        "s_id": ["s1", "s1", "s2", "s2"]
     })
     
-    result = _aggregate_numeric_columns(df, ["value"], method="weighted_mean")
-    
-    # Expected weights:
-    # A: 1/1 = 1.0
-    # B: 1/2 = 0.5 (appears twice)
-    # C: 1/1 = 1.0
-    # Normalized weights:
-    # Total = 1.0 + 0.5 + 0.5 + 1.0 = 3.0
-    # A: 1.0/3.0 = 0.333
-    # B: 0.5/3.0 = 0.167 (each B)
-    # C: 1.0/3.0 = 0.333
-    
-    # Expected weighted mean:
-    # (100 * 0.333) + (1 * 0.167) + (2 * 0.167) + (200 * 0.333) ≈ 100.5
-    expected_weighted = 100.5
-    
-    # Regular mean would be:
-    # (100 + 1 + 2 + 200) / 4 = 75.75
-    expected_unweighted = 75.75
-    
-    assert abs(result["value"] - expected_weighted) < 0.01, \
-        f"Expected weighted mean {expected_weighted:.2f}, but got {result['value']:.2f}. " \
-        f"Note: unweighted mean would be {expected_unweighted:.2f}"
-    
-    # Verify this is different from regular mean
-    regular_mean = df["value"].mean()
-    assert abs(result["value"] - regular_mean) > 20, \
-        "Weighted mean should be notably different from regular mean"
+    # Should raise TypeError for unsupported dtypes
+    with pytest.raises(TypeError, match="Unsupported data types"):
+        resolve_matches(data)
 
-def test_aggregate_numeric_edge_cases():
-    """Test edge cases for _aggregate_numeric_columns."""
-    # Single row
-    df_single = pd.DataFrame({
-        "feature_id": ["A"],
-        "value": [1.0]
-    })
-    result_single = _aggregate_numeric_columns(df_single, ["value"], method="weighted_mean")
-    assert result_single["value"] == 1.0
-    
-    # All same feature_id
-    df_same = pd.DataFrame({
-        "feature_id": ["A", "A", "A"],
-        "value": [1.0, 2.0, 3.0]
-    })
-    result_same = _aggregate_numeric_columns(df_same, ["value"], method="weighted_mean")
-    assert result_same["value"] == 2.0  # Should be simple mean when all weights are equal
-    
-    # Multiple numeric columns
-    df_multi = pd.DataFrame({
-        "feature_id": ["A", "B", "B"],
-        "value1": [1.0, 2.0, 3.0],
-        "value2": [10.0, 20.0, 30.0]
-    })
-    result_multi = _aggregate_numeric_columns(df_multi, ["value1", "value2"], method="weighted_mean")
-    # A: weight = 0.5, B: weight = 0.25 each
-    EXPECTED_VALUE_1 = 1.0 * 0.5 + 2.0 * 0.25 + 3.0 * 0.25  # = 1.75
-    EXPECTED_VALUE_2 = 10.0 * 0.5 + 20.0 * 0.25 + 30.0 * 0.25  # = 17.5
-    assert abs(result_multi["value1"] - EXPECTED_VALUE_1) < 0.01
-    assert abs(result_multi["value2"] - EXPECTED_VALUE_2) < 0.01
 
-def test_features_to_pathway_species_basic_and_expansion():
+def test_resolve_matches_first_method():
+    """Test resolve_matches with first method."""
+    # Setup data with known order
+    data = pd.DataFrame({
+        FEATURE_ID_VAR_DEFAULT: ["A", "C", "B", "B", "A"],
+        SBML_DFS.S_ID: ["s1", "s1", "s1", "s2", "s2"],
+        "value": [1, 2, 3, 4, 5]
+    })
     
-    import pandas as pd
-    # Mock species_identifiers table
-    species_identifiers = pd.DataFrame({
-        "ontology": ["chebi", "chebi", "uniprot", "uniprot"],
-        "identifier": ["A", "B", "X", "Y"],
-        "s_id": [1, 2, 3, 4],
-        "s_name": ["foo", "bar", "baz", "qux"],
-        "bqb": ["BQB_IS", "BQB_IS", "BQB_IS", "BQB_IS"]
+    result = resolve_matches(data, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.FIRST)
+    
+    # Should take first value after sorting by feature_id
+    assert result.loc["s1", "value"] == 1  # A comes first
+    assert result.loc["s2", "value"] == 5  # A comes first
+
+
+def test_resolve_matches_deduplicate_feature_id_within_sid():
+    """Test that only the first value for each (s_id, feature_id) is used in mean aggregation."""
+    data = pd.DataFrame({
+        FEATURE_ID_VAR_DEFAULT: ["A", "A", "B"],
+        SBML_DFS.S_ID: ["s1", "s1", "s1"],
+        "value": [1, 1, 2]  # average should be 1.5 because the two A's are redundant
     })
-    # Basic: no expansion, single identifier per row
-    features = pd.DataFrame({
-        "my_id": ["A", "B", "X"],
-        "other_col": [10, 20, 30]
-    })
-    result = features_to_pathway_species(
-        feature_identifiers=features,
-        species_identifiers=species_identifiers,
-        ontologies={"chebi", "uniprot"},
-        feature_identifiers_var="my_id",
-        expand_identifiers=False
-    )
-    # Should map all three
-    assert set(result["my_id"]) == {"A", "B", "X"}
-    assert set(result["identifier"]) == {"A", "B", "X"}
-    assert set(result["s_name"]) == {"foo", "bar", "baz"}
-    # Expansion: one row with multiple IDs
-    features2 = pd.DataFrame({
-        "my_id": ["A / B / X", "Y"],
-        "other_col": [100, 200]
-    })
-    result2 = features_to_pathway_species(
-        feature_identifiers=features2,
-        species_identifiers=species_identifiers,
-        ontologies={"chebi", "uniprot"},
-        feature_identifiers_var="my_id",
-        expand_identifiers=True,
-        identifier_delimiter="/"
-    )
-    # Should expand to 4 rows (A, B, X, Y)
-    assert set(result2["identifier"]) == {"A", "B", "X", "Y"}
-    assert set(result2["s_name"]) == {"foo", "bar", "baz", "qux"}
-    # Whitespace trimming
-    features3 = pd.DataFrame({
-        "my_id": ["  A  /  B  /X  ", " Y"],
-        "other_col": [1, 2]
-    })
-    result3 = features_to_pathway_species(
-        feature_identifiers=features3,
-        species_identifiers=species_identifiers,
-        ontologies={"chebi", "uniprot"},
-        feature_identifiers_var="my_id",
-        expand_identifiers=True,
-        identifier_delimiter="/"
-    )
-    # Should expand and trim whitespace
-    assert set(result3["identifier"]) == {"A", "B", "X", "Y"}
-    assert set(result3["s_name"]) == {"foo", "bar", "baz", "qux"}
+    
+    result = resolve_matches(data, numeric_agg=RESOLVE_MATCHES_AGGREGATORS.MEAN)
+    assert result.loc["s1", "value"] == 1.5
