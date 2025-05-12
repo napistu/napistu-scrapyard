@@ -643,9 +643,22 @@ def plot_mudata_pcs(mdata: MuData,
         if fig:
             pc_x_name = f"PC{pc_x}"
             pc_y_name = f"PC{pc_y}"
-            # Set title with modality name
-            fig.suptitle(f"{modality.capitalize()} {pc_x_name} vs {pc_y_name} plots colored by sample attributes",
-                      fontsize=16, y=0.95, verticalalignment='top')
+            # If a single metadata attribute is provided, use its name in the title
+            if metadata_attrs is not None:
+                if isinstance(metadata_attrs, str):
+                    attr_name = metadata_attrs
+                elif isinstance(metadata_attrs, list) and len(metadata_attrs) == 1:
+                    attr_name = metadata_attrs[0]
+                else:
+                    attr_name = None
+            else:
+                attr_name = None
+            if attr_name:
+                fig.suptitle(f"{modality.capitalize()} {pc_x_name} vs {pc_y_name} colored by {attr_name}",
+                             fontsize=16, y=0.95, verticalalignment='top')
+            else:
+                fig.suptitle(f"{modality.capitalize()} {pc_x_name} vs {pc_y_name} plots colored by sample attributes",
+                             fontsize=16, y=0.95, verticalalignment='top')
             figures[modality] = fig
     
     return figures
@@ -746,23 +759,6 @@ def _plot_pca_variance(
     ax2.set_ylabel('Cumulative Variance Ratio', color=color_palette['line'])
     ax2.tick_params(axis='y', labelcolor=color_palette['line'])
     ax2.set_ylim([0, min(1.05, max(cum_var) * 1.1)])
-    
-    # Add horizontal line at 0.8 cumulative variance
-    cum_var_threshold = 0.8
-    ax2.axhline(y=cum_var_threshold, color=color_palette['threshold'], 
-               linestyle='--', alpha=0.5,
-               label=f'{cum_var_threshold:.0%} threshold')
-    
-    # Find where cumulative variance exceeds threshold
-    threshold_idx = np.argmax(cum_var >= cum_var_threshold)
-    if threshold_idx < len(cum_var):
-        threshold_pc = threshold_idx + 1
-        ax2.annotate(f'PC{threshold_pc}', 
-                    xy=(threshold_pc, cum_var_threshold),
-                    xytext=(threshold_pc + 1, cum_var_threshold - 0.1),
-                    arrowprops=dict(arrowstyle='->', connectionstyle="arc3,rad=-0.2"),
-                    horizontalalignment='left',
-                    verticalalignment='top')
     
     # Create DataFrame with results
     plot_df = pd.DataFrame({
@@ -1094,8 +1090,12 @@ def _preprocess_metadata_for_correlation(
         # Automatically select categorical and numeric columns
         metadata_vars = []
         for col in adata.obs.columns:
-            # Skip columns with too many unique values (likely cell IDs or similar)
-            if adata.obs[col].nunique() < min(100, adata.n_obs // 10):
+            if pd.api.types.is_categorical_dtype(adata.obs[col]) or pd.api.types.is_object_dtype(adata.obs[col]):
+                # Only filter categorical/object columns by unique value count
+                if adata.obs[col].nunique() < min(100):
+                    metadata_vars.append(col)
+            elif pd.api.types.is_numeric_dtype(adata.obs[col]):
+                # Always include numeric columns
                 metadata_vars.append(col)
     
     # Select only the requested metadata
