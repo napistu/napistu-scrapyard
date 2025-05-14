@@ -5,6 +5,7 @@ This module contains functions for regression and factor analysis.
 from joblib import Parallel, delayed
 import os
 from typing import List, Optional, Tuple, Dict, Union, Any
+import logging
 
 from anndata import AnnData
 import numpy as np
@@ -278,21 +279,8 @@ def add_regression_results_to_anndata(
     # Make a copy to avoid modifying the original results
     results = results_df.copy()
     
-    # Create a hierarchical dictionary to store in adata.uns
-    regression_dict: Dict[str, Any] = {
-        "params": {
-            "features": results["feature"].unique().tolist(),
-            "coefficients": results["coefficient"].unique().tolist(),
-            "n_features": len(results["feature"].unique()),
-            "n_coefficients": len(results["coefficient"].unique()),
-            "fdr_cutoff": fdr_cutoff,
-            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-        },
-        "results": results.to_dict("records"),
-    }
-    
-    # Store in adata.uns
-    adata.uns[key_added] = regression_dict
+    # Store in adata.uns (serialization-friendly: only DataFrame, not nested dict)
+    adata.uns[key_added] = results
     
     # Also annotate significant associations in var
     # Create a significance mask for each coefficient
@@ -387,25 +375,10 @@ def add_regression_results_to_anndata(
                 index=adata.var_names
             )
     
-    # Add a summarized view for quick access to top features per coefficient
-    top_features: Dict[str, List[Dict[str, Any]]] = {}
-    for coef in results["coefficient"].unique():
-        # Sort by absolute effect size
-        coef_results = results[results["coefficient"] == coef].copy()
-        coef_results["abs_effect"] = np.abs(coef_results["estimate"])
-        coef_results = coef_results.sort_values("abs_effect", ascending=False)
-        
-        # Get top 50 features by effect size (with p-value < fdr_cutoff)
-        p_col = "fdr_bh" if "fdr_bh" in coef_results.columns else "p_value"
-        top = coef_results[coef_results[p_col] < fdr_cutoff].head(50)
-        
-        if len(top) > 0:
-            top_features[coef] = top[["feature", "estimate", p_col]].to_dict("records")
-    
-    # Store top features in uns
-    adata.uns[f"{key_added}_top_features"] = top_features
-    
     return None if inplace else adata
+
+
+
 
 
 def plot_pvalue_histograms(
@@ -415,11 +388,13 @@ def plot_pvalue_histograms(
     figsize: Tuple[int, int] = (12, 8),
     include_stats: bool = True,
     show_ks_test: bool = True,
-    fdr_cutoff: float = 0.05
+    fdr_cutoff: float = 0.05,
+    terms: Optional[list] = None
 ) -> Dict[str, Dict[str, plt.Figure]]:
     """
     Generate histograms of p-values and FDR-corrected p-values for all coefficients 
     in regression results stored in AnnData or MuData objects.
+    Optionally, only plot for a subset of coefficients/terms if 'terms' is provided.
     
     Parameters
     ----------
@@ -438,7 +413,9 @@ def plot_pvalue_histograms(
         to the uniform distribution. Default is True.
     fdr_cutoff : float, optional
         Significance threshold for FDR-corrected p-values. Default is 0.05.
-        
+    terms : list, optional
+        List of coefficient names/terms to plot. If None, plot all coefficients.
+    
     Returns
     -------
     Dict[str, Dict[str, plt.Figure]]
@@ -451,10 +428,14 @@ def plot_pvalue_histograms(
     # Initialize dictionary to store figure objects
     figures: Dict[str, Dict[str, plt.Figure]] = {}
     
+    # Set up logger
+    logger = logging.getLogger(__name__)
+    
     # Function to process a single AnnData object
     def process_anndata(
         adata: AnnData, 
-        modality_name: Optional[str] = None
+        modality_name: Optional[str] = None,
+        terms=terms  # capture from outer scope
     ) -> Dict[str, plt.Figure]:
         # Check if regression results exist
         if regression_key not in adata.uns:
@@ -479,108 +460,31 @@ def plot_pvalue_histograms(
         
         # Get unique coefficients
         coefficients: List[str] = results_df["coefficient"].unique().tolist()
+        # If terms is provided, filter coefficients
+        if terms is not None:
+            # Support string input as a single term
+            if isinstance(terms, str):
+                terms = [terms]
+            missing_terms = [t for t in terms if t not in coefficients]
+            found_terms = [t for t in terms if t in coefficients]
+            if len(found_terms) == 0:
+                raise ValueError("None of the specified terms were found in the regression results.")
+            if missing_terms:
+                logger.warning(f"The following terms were not found in the regression results and will be skipped: {missing_terms}")
+            coefficients = found_terms
         
         for coef in coefficients:
-            # Filter results for current coefficient
             coef_results = results_df[results_df["coefficient"] == coef]
-            
-            # Create figure - now with 2-3 panels depending on available data
-            n_panels = 3 if "fdr_bh" in coef_results.columns else 2
-            fig, axes = plt.subplots(1, n_panels, figsize=(figsize[0]*n_panels/2, figsize[1]))
-            fig.suptitle(f"P-value Distribution for Coefficient: {coef}"
-                         f"{' in ' + modality_name if modality_name else ''}", 
-                         fontsize=16)
-            
-            # Raw p-values
-            sns.histplot(coef_results["p_value"], bins=20, kde=True, ax=axes[0])
-            axes[0].set_title("Raw P-values")
-            axes[0].set_xlabel("P-value")
-            axes[0].set_ylabel("Count")
-            
-            # Add reference uniform distribution line
-            x = np.linspace(0, 1, 100)
-            y = len(coef_results) * 0.05  # Adjust height based on data
-            axes[0].plot(x, [y] * 100, 'r--', label='Uniform Distribution')
-            axes[0].legend()
-            
-            # Add summary statistics
-            if include_stats:
-                avg_p = coef_results["p_value"].mean()
-                median_p = coef_results["p_value"].median()
-                sig_count = sum(coef_results["p_value"] < 0.05)
-                sig_pct = 100 * sig_count / len(coef_results)
-                
-                stats_text = f"Mean: {avg_p:.4f}\nMedian: {median_p:.4f}\n"
-                stats_text += f"Significant: {sig_count}/{len(coef_results)} ({sig_pct:.1f}%)"
-                
-                axes[0].text(0.05, 0.95, stats_text, 
-                             transform=axes[0].transAxes, 
-                             verticalalignment='top',
-                             bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            
-            # QQ plot of p-values (to check for uniform distribution)
-            # This helps identify deviations from expected p-value distribution
-            pvals = np.sort(coef_results["p_value"])
-            expected = np.linspace(0, 1, len(pvals) + 1)[1:]
-            
-            axes[1].scatter(expected, pvals, alpha=0.5)
-            axes[1].plot([0, 1], [0, 1], 'r--')
-            axes[1].set_title("P-value QQ Plot")
-            axes[1].set_xlabel("Expected P-value")
-            axes[1].set_ylabel("Observed P-value")
-            
-            # FDR-corrected p-values (if available)
-            if "fdr_bh" in coef_results.columns:
-                sns.histplot(coef_results["fdr_bh"], bins=20, kde=True, ax=axes[2])
-                axes[2].set_title("FDR-corrected P-values (Benjamini-Hochberg)")
-                axes[2].set_xlabel("Adjusted P-value")
-                axes[2].set_ylabel("Count")
-                
-                # Add reference uniform distribution line
-                axes[2].plot(x, [y] * 100, 'r--', label='Uniform Distribution')
-                axes[2].legend()
-                
-                # Add summary statistics
-                if include_stats:
-                    avg_fdr = coef_results["fdr_bh"].mean()
-                    median_fdr = coef_results["fdr_bh"].median()
-                    sig_count_fdr = sum(coef_results["fdr_bh"] < fdr_cutoff)
-                    sig_pct_fdr = 100 * sig_count_fdr / len(coef_results)
-                    
-                    stats_text = f"Mean: {avg_fdr:.4f}\nMedian: {median_fdr:.4f}\n"
-                    stats_text += f"Significant: {sig_count_fdr}/{len(coef_results)} ({sig_pct_fdr:.1f}%)"
-                    
-                    axes[2].text(0.05, 0.95, stats_text, 
-                                 transform=axes[2].transAxes, 
-                                 verticalalignment='top',
-                                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-            
-            # Calculate KS test against uniform distribution (expected for null hypothesis)
-            if show_ks_test:
-                ks_stat, ks_pval = kstest(coef_results["p_value"], 'uniform')
-                
-                # Add KS test result
-                fig.text(0.5, 0.01, 
-                         f"Kolmogorov-Smirnov test against uniform distribution: "
-                         f"statistic={ks_stat:.4f}, p-value={ks_pval:.4f}",
-                         ha='center', fontsize=12)
-            
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-            
-            # Save figure if output_dir is provided
-            if output_dir is not None:
-                # Create modality directory if needed
-                mod_dir = os.path.join(output_dir, 
-                                     modality_name if modality_name else "anndata")
-                os.makedirs(mod_dir, exist_ok=True)
-                
-                # Save figure
-                safe_coef = coef.replace(" ", "_").replace("/", "_").replace("\\", "_")
-                file_path = os.path.join(mod_dir, f"pvalue_hist_{safe_coef}.png")
-                fig.savefig(file_path, dpi=300, bbox_inches='tight')
-                print(f"Saved histogram to {file_path}")
-            
-            # Store figure
+            fig = _plot_single_term_pvalue_histograms(
+                coef_results=coef_results,
+                coef=coef,
+                modality_name=modality_name,
+                include_stats=include_stats,
+                show_ks_test=show_ks_test,
+                fdr_cutoff=fdr_cutoff,
+                output_dir=output_dir,
+                figsize=figsize
+            )
             mod_figures[coef] = fig
         
         return mod_figures
@@ -604,3 +508,99 @@ def plot_pvalue_histograms(
     
     print("Histogram generation complete.")
     return figures
+
+
+def _plot_single_term_pvalue_histograms(
+    coef_results: pd.DataFrame,
+    coef: str,
+    modality_name: Optional[str],
+    include_stats: bool,
+    show_ks_test: bool,
+    fdr_cutoff: float,
+    output_dir: Optional[str],
+    figsize: Tuple[int, int]
+) -> plt.Figure:
+    """
+    Utility to plot p-value histograms and QQ plots for a single coefficient/term.
+    Returns the matplotlib Figure.
+    """
+    n_panels = 3 if "fdr_bh" in coef_results.columns else 2
+    fig, axes = plt.subplots(1, n_panels, figsize=(figsize[0]*n_panels/2, figsize[1]))
+    fig.suptitle(f"P-value Distribution for Coefficient: {coef}" +
+                 (f" in {modality_name}" if modality_name else ""),
+                 fontsize=16)
+
+    # Raw p-values
+    sns.histplot(coef_results["p_value"], bins=20, kde=True, ax=axes[0])
+    axes[0].set_title("Raw P-values")
+    axes[0].set_xlabel("P-value")
+    axes[0].set_ylabel("Count")
+
+    # Add reference uniform distribution line
+    x = np.linspace(0, 1, 100)
+    y = len(coef_results) * 0.05  # Adjust height based on data
+    axes[0].plot(x, [y] * 100, 'r--', label='Uniform Distribution')
+    axes[0].legend()
+
+    # Add summary statistics
+    if include_stats:
+        avg_p = coef_results["p_value"].mean()
+        median_p = coef_results["p_value"].median()
+        sig_count = sum(coef_results["p_value"] < 0.05)
+        sig_pct = 100 * sig_count / len(coef_results)
+        stats_text = f"Mean: {avg_p:.4f}\nMedian: {median_p:.4f}\n"
+        stats_text += f"Significant: {sig_count}/{len(coef_results)} ({sig_pct:.1f}%)"
+        axes[0].text(0.05, 0.95, stats_text,
+                     transform=axes[0].transAxes,
+                     verticalalignment='top',
+                     bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # QQ plot of p-values
+    pvals = np.sort(coef_results["p_value"])
+    expected = np.linspace(0, 1, len(pvals) + 1)[1:]
+    axes[1].scatter(expected, pvals, alpha=0.5)
+    axes[1].plot([0, 1], [0, 1], 'r--')
+    axes[1].set_title("P-value QQ Plot")
+    axes[1].set_xlabel("Expected P-value")
+    axes[1].set_ylabel("Observed P-value")
+
+    # FDR-corrected p-values (if available)
+    if n_panels == 3:
+        sns.histplot(coef_results["fdr_bh"], bins=20, kde=True, ax=axes[2])
+        axes[2].set_title("FDR-corrected P-values (Benjamini-Hochberg)")
+        axes[2].set_xlabel("Adjusted P-value")
+        axes[2].set_ylabel("Count")
+        axes[2].plot(x, [y] * 100, 'r--', label='Uniform Distribution')
+        axes[2].legend()
+        if include_stats:
+            avg_fdr = coef_results["fdr_bh"].mean()
+            median_fdr = coef_results["fdr_bh"].median()
+            sig_count_fdr = sum(coef_results["fdr_bh"] < fdr_cutoff)
+            sig_pct_fdr = 100 * sig_count_fdr / len(coef_results)
+            stats_text = f"Mean: {avg_fdr:.4f}\nMedian: {median_fdr:.4f}\n"
+            stats_text += f"Significant: {sig_count_fdr}/{len(coef_results)} ({sig_pct_fdr:.1f}%)"
+            axes[2].text(0.05, 0.95, stats_text,
+                         transform=axes[2].transAxes,
+                         verticalalignment='top',
+                         bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # KS test
+    if show_ks_test:
+        ks_stat, ks_pval = kstest(coef_results["p_value"], 'uniform')
+        fig.text(0.5, 0.01,
+                 f"Kolmogorov-Smirnov test against uniform distribution: "
+                 f"statistic={ks_stat:.4f}, p-value={ks_pval:.4f}",
+                 ha='center', fontsize=12)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+    # Save figure if output_dir is provided
+    if output_dir is not None:
+        mod_dir = os.path.join(output_dir, modality_name if modality_name else "anndata")
+        os.makedirs(mod_dir, exist_ok=True)
+        safe_coef = coef.replace(" ", "_").replace("/", "_").replace("\\", "_")
+        file_path = os.path.join(mod_dir, f"pvalue_hist_{safe_coef}.png")
+        fig.savefig(file_path, dpi=300, bbox_inches='tight')
+        print(f"Saved histogram to {file_path}")
+
+    return fig

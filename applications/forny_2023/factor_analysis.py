@@ -20,6 +20,7 @@ import seaborn as sns
 import statsmodels.formula.api as smf
 from statsmodels.stats.multitest import multipletests
 
+FACTOR_REGRESSION_STR = "mofa_regression_{}"
 
 def create_minimal_mudata(
     original_mdata: md.MuData,
@@ -1315,105 +1316,146 @@ def summarize_factor_regression(
     
     summary_df = sig_results[available_cols].copy()
     
-    # Format numeric columns
+    # Group by factor or term depending on preference
+    # Always sort by p-value and q-value (if available), then by factor or term
+    sort_cols = []
+    if 'p_value' in summary_df.columns:
+        sort_cols.append('p_value')
+    if 'q_value' in summary_df.columns:
+        sort_cols.append('q_value')
+    # Add grouping column
+    if group_by_factor:
+        sort_cols = ['factor_name'] + sort_cols
+    else:
+        sort_cols = ['term'] + sort_cols
+    summary_df = summary_df.sort_values(sort_cols, ascending=True)
+
+    # Format numeric columns (after sorting)
     for col in ['estimate', 'std_err']:
         if col in summary_df.columns:
             summary_df[col] = summary_df[col].map('{:.3f}'.format)
-    
+
     for col in ['p_value', 'q_value']:
         if col in summary_df.columns:
             summary_df[col] = summary_df[col].map('{:.2e}'.format)
-    
+
     for col in ['rsquared']:
         if col in summary_df.columns:
             summary_df[col] = summary_df[col].map('{:.3f}'.format)
     
-    # Group by factor or term depending on preference
-    if group_by_factor:
-        summary_df = summary_df.sort_values(['factor_name', p_col])
-    else:
-        summary_df = summary_df.sort_values(['term', p_col])
-    
     return summary_df
 
 
-def add_regression_to_mudata(
+def factor_term_scatterplot(
     mdata: MuData,
-    regression_results: pd.DataFrame,
-    key_added: str = "factor_regression",
-    alpha: float = 0.05,
-    inplace: bool = True
-) -> Optional[MuData]:
+    factor: int,
+    formula_name: str,
+    term: Optional[str] = None
+) -> None:
     """
-    Add regression results to MuData object.
-    
+    Scatterplot of a MOFA factor against a sample attribute, with regression line.
+
     Parameters
     ----------
     mdata : MuData
-        MuData object with MOFA results
-    regression_results : pd.DataFrame
-        DataFrame with regression results from regress_factors_with_formula()
-    key_added : str, default="factor_regression"
-        Key under which to store the regression results in mdata.uns
-    alpha : float, default=0.05
-        Significance threshold for q-values
-    inplace : bool, default=True
-        If True, modify mdata inplace; otherwise return a copy
-        
+        MuData object containing MOFA results and sample attributes.
+    factor : int
+        Factor index or name to plot.
+    formula_name : str
+        Name of the regression formula (used as key in mdata.uns).
+    term : str or None, optional
+        Name of the sample attribute to plot on the x-axis. If None, uses formula_name.
+
     Returns
     -------
-    Optional[MuData]
-        If inplace=False, returns a modified copy of mdata
+    None
     """
-    if not inplace:
-        mdata = mdata.copy()
-    
-    # Use q_value if available, otherwise use p_value
-    p_col = "q_value" if "q_value" in regression_results.columns else "p_value"
-    
-    # Store regression results in uns
-    mdata.uns[key_added] = {
-        "params": {
-            "alpha": alpha,
-            "n_factors": len(regression_results["factor_idx"].unique()),
-            "n_terms": len(regression_results["term"].unique()),
-            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-        },
-        "results": regression_results.to_dict("records")
-    }
-    
-    # Create a summary of significant associations efficiently
-    mask = regression_results[p_col] < alpha if p_col in regression_results.columns else pd.Series(False, index=regression_results.index)
-    sig_results = regression_results[mask].copy()
-    
-    if not sig_results.empty:
-        # Group by factor and get top associations
-        factor_summary = {}
-        for factor_idx in sig_results["factor_idx"].unique():
-            factor_name = f"Factor_{factor_idx+1}"
-            factor_results = sig_results[sig_results["factor_idx"] == factor_idx]
-            
-            # Sort by significance and effect size
-            factor_results = factor_results.assign(abs_estimate=factor_results['estimate'].abs())
-            factor_results = factor_results.sort_values([p_col, 'abs_estimate'], 
-                                                      ascending=[True, False])
-            
-            # Extract top associations
-            top_assoc = []
-            for _, row in factor_results.iterrows():
-                top_assoc.append({
-                    "term": row["term"],
-                    "estimate": row["estimate"],
-                    "p_value": row[p_col],
-                    "rsquared": row["rsquared"]
-                })
-            
-            factor_summary[factor_name] = top_assoc
-        
-        # Store summary in uns
-        mdata.uns[f"{key_added}_summary"] = factor_summary
-    
-    return None if inplace else mdata
+    # If term is None, use formula_name as the term
+    if term is None:
+        term = formula_name
+    df = _factor_term_sample_attrs(mdata, factor, formula_name, term)
+    # Get the actual factor name for labeling
+    factor_regression_key = FACTOR_REGRESSION_STR.format(formula_name)
+    factor_term_summaries = mdata.uns[factor_regression_key]
+    if (factor_term_summaries["factor_name"] == factor).any():
+        factor_name = factor
+    elif (factor_term_summaries["factor_idx"] == factor).any():
+        factor_name = factor_term_summaries[factor_term_summaries["factor_idx"] == factor]["factor_name"].iloc[0]
+    else:
+        factor_name = str(factor)
+    # Plot the data with regression line
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    plt.figure(figsize=(7, 5))
+    sns.regplot(data=df, x="sample_attribute", y="factor_values", scatter_kws={'alpha':0.7})
+    plt.xlabel(term)
+    plt.ylabel(factor_name)
+    # Only show (formula_name) in title if term != formula_name
+    if term == formula_name:
+        title = f"{factor_name} vs {term}"
+    else:
+        title = f"{factor_name} vs {term} ({formula_name})"
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def _factor_term_sample_attrs(
+    mdata: MuData,
+    factor: int,
+    formula_name: str,
+    term: str
+) -> pd.DataFrame:
+    """
+    Helper to extract a DataFrame of sample attribute and factor values for plotting.
+
+    Parameters
+    ----------
+    mdata : MuData
+        MuData object containing MOFA results and sample attributes.
+    factor : int
+        Factor index or name to extract.
+    formula_name : str
+        Name of the regression formula (used as key in mdata.uns).
+    term : str
+        Name of the sample attribute to extract.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns 'sample_attribute' and 'factor_values'.
+    """
+    factor_regression_key = FACTOR_REGRESSION_STR.format(formula_name)
+    # validate that the key exists
+    if factor_regression_key not in mdata.uns:
+        raise KeyError(f"No regression results found in mdata.uns under key '{factor_regression_key}'")
+
+    factor_term_summaries = mdata.uns[factor_regression_key]
+    # see if factor_name exists or factor_idx was provided in the factor arg
+    if (factor_term_summaries["factor_name"] == factor).any():
+        factor_df = factor_term_summaries[factor_term_summaries["factor_name"] == factor]
+    elif (factor_term_summaries["factor_idx"] == factor).any():
+        factor_df = factor_term_summaries[factor_term_summaries["factor_idx"] == factor]
+    else:
+        raise ValueError(f"Factor '{factor}' did not match the factor_name or factor_idx values factor_term_summaries")
+
+    factor_idx = factor_df["factor_idx"].iloc[0]
+
+    # lookup factor values from obsm
+    factor_values = mdata.obsm["X_mofa"][:, factor_idx]
+
+    # pull out the relevant sample attribute
+    sample_attribute = mdata[mdata.mod_names[0]].obs
+
+    # check for the term in the sample attribute
+    if term in sample_attribute.columns:
+        sample_attribute = sample_attribute[term]
+    else:
+        raise ValueError(f"Term '{term}' not found in sample attribute")
+
+    df = pd.DataFrame({"sample_attribute": sample_attribute, "factor_values": factor_values})
+
+    return df
 
 
 # Additional utility functions with underscore prefix
