@@ -19,5 +19,6 @@ uv pip install seaborn
 uv pip install muon
 uv pip install mofapy2
 
+uv pip install ipykernel
 python -m ipykernel install --user --name=forny-2023
 ```
