@@ -137,7 +137,7 @@ def plot_clustered_correlation_heatmap(df, figsize=(10, 8), cmap="coolwarm", ann
     # Use 1 - correlation as the distance metric
     pairwise_dists = 1 - corr_matrix
     # Replace NaN with 0 (perfect correlation) for clustering
-    pairwise_dists = pairwise_dists.fillna(0)
+    pairwise_dists = pairwise_dists.fillna(int(0))
     row_linkage = linkage(squareform(pairwise_dists), method='average')
     col_linkage = linkage(squareform(pairwise_dists.T), method='average')
 
