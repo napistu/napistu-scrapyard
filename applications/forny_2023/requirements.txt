@@ -1,0 +1,12 @@
+napistu==0.2.*
+# for excel support
+openpyxl
+mudata==0.3.*
+# regression
+scikit-learn==1.5.*
+# EDA
+seaborn==0.*
+# multiomic factor analysis
+muon==0.1.*
+mofapy2==0.7.*
+ipykernel
