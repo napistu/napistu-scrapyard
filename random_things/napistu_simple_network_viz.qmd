@@ -1,0 +1,125 @@
+---
+title: "napistu_network_image"
+author: "Shackett"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    code-summary: "Show the code"
+    toc: true
+    theme: minty
+    highlight: tango
+    code-block-bg: true
+    code-block-border-left: "#5BB867"
+---
+
+```{r imports}
+library(wesanderson)
+suppressPackageStartupMessages(library(igraph))
+library(ggraph)
+suppressPackageStartupMessages(library(ggplot2))
+
+# Set seed for reproducibility
+set.seed(42)
+
+# Network parameters
+n_nodes <- 100
+n_edges_target <- 150
+
+# Color scheme
+pretty_colors <- wesanderson::wes_palette("Darjeeling1", 5)
+colorscheme <- tibble::tribble(
+  ~ category, ~ color,
+  "A", pretty_colors[1],
+  "B", pretty_colors[2],
+  "C", pretty_colors[5],
+  "other", "gray70"
+)
+colors <- setNames(colorscheme$color, colorscheme$category)
+```
+
+```{r create_network}
+# Create mixed network for better intermediate nodes
+m <- 1  # Start with smaller m for Barabási-Albert
+g <- sample_pa(n = n_nodes, m = m, directed = TRUE)
+
+# Add random edges to reach target and create more intermediate hubs
+current_edges <- ecount(g)
+remaining_edges <- n_edges_target - current_edges
+
+for(i in 1:remaining_edges) {
+  from <- sample(1:n_nodes, 1)
+  to <- sample(1:n_nodes, 1)
+  
+  attempts <- 0
+  while((from == to || are_adjacent(g, from, to)) && attempts < 50) {
+    from <- sample(1:n_nodes, 1)
+    to <- sample(1:n_nodes, 1)
+    attempts <- attempts + 1
+  }
+  
+  if(attempts < 50) {
+    g <- add_edges(g, c(from, to))
+  }
+}
+
+# Randomize edge directions
+edge_list <- as_edgelist(g)
+n_edges <- nrow(edge_list)
+flip_edges <- sample(c(TRUE, FALSE), n_edges, replace = TRUE)
+edge_list_flipped <- edge_list
+edge_list_flipped[flip_edges, ] <- edge_list[flip_edges, c(2, 1)]
+g <- graph_from_edgelist(edge_list_flipped, directed = TRUE)
+```
+
+```{r assign_categories}
+# Calculate number of descendants for each node
+V(g)$n_descendants <- sapply(1:vcount(g), function(i) {
+  descendants <- subcomponent(g, i, mode = "out")
+  return(length(descendants) - 1)  # -1 to exclude the node itself
+})
+
+# Find node with ~50 descendants (closest to target)
+target_descendants <- 50
+descendants_diff <- abs(V(g)$n_descendants - target_descendants)
+regulatory_node <- which.min(descendants_diff)
+
+# Find all descendants of the regulatory node
+descendants <- subcomponent(g, regulatory_node, mode = "out")
+descendants_to_assign <- descendants[descendants != regulatory_node]
+
+# Initialize all nodes as "other"
+V(g)$category <- "other"
+
+# Assign descendants to A, B, C categories
+if(length(descendants_to_assign) > 0) {
+  V(g)$category[descendants_to_assign] <- sample(c("A", "B", "C"), 
+                                                 length(descendants_to_assign), 
+                                                 replace = TRUE)
+}
+
+# Set up node colors and sizes
+V(g)$color <- colors[V(g)$category]
+V(g)$size <- 2
+
+# Make regulatory node gold and larger
+V(g)$color[regulatory_node] <- "gold"
+V(g)$size[regulatory_node] <- 4
+
+# Print summary
+cat("Regulatory Node:", regulatory_node, "with", V(g)$n_descendants[regulatory_node], "descendants\n")
+cat("Category distribution:\n")
+print(table(V(g)$category))
+```
+
+```{r visualize}
+# Create the visualization
+p <- ggraph(g, layout = "kk") +
+  geom_edge_link(color = "gray70", width = 0.3, aes(alpha = ..index..)) +
+  geom_node_point(aes(color = I(color), size = I(size))) +
+  theme_graph() +
+  theme(legend.position = "none")
+
+print(p)
+```
