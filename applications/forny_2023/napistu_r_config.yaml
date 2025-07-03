@@ -1,0 +1,4 @@
+python_config:
+  virtualenv: ".venv"
+assets_config:
+  assets_dir: '~/Desktop/DATA/napistu_data/human_consensus_w_distances'

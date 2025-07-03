@@ -1,0 +1,115 @@
+---
+title: "PPR Network Visualization"
+author: "Shackett"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    code-summary: "Show the code"
+    toc: true
+    theme: minty
+    highlight: tango
+    code-block-bg: true
+    code-block-border-left: "#5BB867"
+---
+
+```{r config}
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(napistu.r))
+
+NAPISTU_R_CONFIG_NAME = "napistu_r_config.yaml"
+PROJECT_DIR = "~/Desktop/DATA/Forny2023"
+PPR_RESULTS_OUTFILE = "ppr_results.tsv"
+PPR_RESULTS_PATH = file.path(PROJECT_DIR, PPR_RESULTS_OUTFILE)
+```
+
+Using Napistu from R involves creating a configuration which is used to set the Python environment used by reticulate and to load files produced by the Napistu python library. The assets that are needed for network analysis in R are:
+
+1. An `SBML_dfs` object which serves as a relational database representation of the pathway representation.
+2. A `NapistuGraph` object which is an `igraph.Graph` subclass formed by translating the `SBML_dfs` using a specified wiring strategy and attributes like edge weights.
+3. A species identifiers table which contains the systematic identifiers for the molecular species in the model.
+4. Optionally, precomputed distances between pairs of molecular species. This can greatly speed up calculations of shortest paths which is essential when calculating many such paths. In this notebook, we'll use the precomputed distances to calculate the molecular neighborhood around MMUT.
+
+```{python, eval = FALSE}
+from napistu.gcs import downloads
+
+_ = downloads.load_public_napistu_asset(
+    asset = "human_consensus_w_distances",
+    data_dir = NAPISTU_DATA_DIR,
+    subasset = "sbml_dfs"
+)
+```
+
+```{r}
+# load the sbml_dfs, network and other assets and bind a reticulate environment
+# with napistu-py
+napistu_config <- napistu.r::load_napistu_config(NAPISTU_R_CONFIG_NAME)
+setup_napistu_list(napistu_config)
+
+# reticulate binding for the Napistu Python package
+napistu <- napistu_list$python_modules$napistu
+```
+
+```{r}
+ppr_results <- readr::read_csv(PPR_RESULTS_PATH, show_col_types = FALSE)
+```
+
+## Defining the neighborhood of MMUT
+
+(R)-methylmalonyl-CoA CoA-carbonylmutase (MMUT) (an [isomerase in the TCA cycle](https://www.genome.jp/entry/R00833)) mutations are the root cause of a large fraction of MMA cases. To get warmed up on network visualization we can create a neighborhood around MMUT which encompasses both MMUT's regulators and its downstream targets. Since the NapistuGraph we'll be querying includes a detailed human metabolic network, Recon3D, we can expect that the neighborhood will encompass both proteins and metabolites.
+
+```{r yfg_selection}
+# choose your favorite gene
+YFG_ENSG <- "ENSG00000146085"
+
+matching_ids <- napistu$ontologies$id_tables$filter_id_table(
+  id_table = napistu_list$species_identifiers,
+  identifiers = YFG_ENSG,
+  bqbs = c("BQB_IS", "BQB_IS_ENCODED_BY")
+)
+
+S_ID <- purrr::pluck(matching_ids, "s_id")
+```
+
+```{r neighborhoods}
+neighborhoods <- napistu.r::create_neighborhood_table(
+  napistu_list,
+  species_id = S_ID,
+  network_type = "hourglass",
+  max_steps = 4L,
+  max_neighbors = 40L
+)
+```
+
+```{r plot_neighborhoods, fig.height = 10, fig.width = 10}
+neighborhoods_plot <- napistu.r::plot_neighborhoods(
+  napistu_list,
+  neighborhoods
+)
+```
+
+## Defining subgraphs based on multiomic signatures
+
+```{r}
+ppr_enriched_vertices <- ppr_results %>%
+  tidyr::nest(attr_scores = -attribute)
+
+scores <- ppr_enriched_vertices %>%
+  dplyr::filter(attribute == "est_OHCblPlus_transcriptomics") %>%
+  purrr::pluck("attr_scores")
+
+subgraph <- napistu.r::define_subgraphs(
+  napistu_list,
+  subgraph_vertices = scores[[1]]$name
+)
+
+component_r_graph <- napistu.r::convert_napistu_graph(subgraph[[1]]$component_graph, napistu_list)
+component_r_graph$vertices
+
+napistu.r::plot_subgraph(
+  napistu_list,
+  subgraph
+)
+
+```
