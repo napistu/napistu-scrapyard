@@ -14,14 +14,32 @@ format:
     code-block-border-left: "#5BB867"
 ---
 
-```{r config}
+```{r config, include = FALSE}
 suppressPackageStartupMessages(library(dplyr))
 suppressPackageStartupMessages(library(napistu.r))
 
-NAPISTU_R_CONFIG_NAME = "napistu_r_config.yaml"
-PROJECT_DIR = "~/Desktop/DATA/Forny2023"
-PPR_RESULTS_OUTFILE = "ppr_results.tsv"
-PPR_RESULTS_PATH = file.path(PROJECT_DIR, PPR_RESULTS_OUTFILE)
+NAPISTU_R_CONFIG_NAME <- "napistu_r_config.yaml"
+PROJECT_DIR <- "~/Desktop/DATA/Forny2023"
+PPR_RESULTS_OUTFILE <- "ppr_results.tsv"
+NETWORK_PLOTS_OUTDIR_NAME <- "network_plots"
+OVERWRITE <- FALSE
+
+checkmate::assert_file_exists(NAPISTU_R_CONFIG_NAME)
+checkmate::assert_directory_exists(PROJECT_DIR)
+checkmate::assert_string(PPR_RESULTS_OUTFILE)
+checkmate::assert_string(NETWORK_PLOTS_OUTDIR_NAME)
+checkmate::assert_logical(OVERWRITE, len = 1)
+
+PPR_RESULTS_PATH <- file.path(PROJECT_DIR, PPR_RESULTS_OUTFILE)
+# use the current directory and add plots to gitignore
+# that way the pngs generated can be referenced and embedded in the rendered html
+NETWORK_PLOTS_OUTDIR <- NETWORK_PLOTS_OUTDIR_NAME
+
+checkmate::assert_file_exists(PPR_RESULTS_PATH)
+checkmate::assert_directory_exists(NETWORK_PLOTS_OUTDIR_NAME)
+
+# settings
+MAX_SUBGRAPH_COMPONENTS <- 2L
 ```
 
 Using Napistu from R involves creating a configuration which is used to set the Python environment used by reticulate and to load files produced by the Napistu python library. The assets that are needed for network analysis in R are:
@@ -41,23 +59,34 @@ _ = downloads.load_public_napistu_asset(
 )
 ```
 
-```{r}
+```{r setup_napistu_py}
 # load the sbml_dfs, network and other assets and bind a reticulate environment
 # with napistu-py
 napistu_config <- napistu.r::load_napistu_config(NAPISTU_R_CONFIG_NAME)
-setup_napistu_list(napistu_config)
+setup_napistu_list(napistu_config, skip_validation = TRUE)
 
 # reticulate binding for the Napistu Python package
 napistu <- napistu_list$python_modules$napistu
+
+# `setup_napistu_list` creates a napistu_list object full of goodies
+napistu_list
 ```
 
-```{r}
+```{r refine_inputs}
+# drop some uninformative pathways from the source counts table so they aren't highlighted in the network graph
+# this could be handled upstream, but its easy enough to patch it here
+napistu_list$reactions_source_total_counts <- napistu_list$reactions_source_total_counts %>%
+  dplyr::filter(!(pathway_id %in% c("uncompartmentalization")), !stringr::str_detect(pathway_id, "/cache/"))
+```
+
+```{r load_ppr}
+# load PPR scores and significance based on vertex permutation
 ppr_results <- readr::read_csv(PPR_RESULTS_PATH, show_col_types = FALSE)
 ```
 
 ## Defining the neighborhood of MMUT
 
-(R)-methylmalonyl-CoA CoA-carbonylmutase (MMUT) (an [isomerase in the TCA cycle](https://www.genome.jp/entry/R00833)) mutations are the root cause of a large fraction of MMA cases. To get warmed up on network visualization we can create a neighborhood around MMUT which encompasses both MMUT's regulators and its downstream targets. Since the NapistuGraph we'll be querying includes a detailed human metabolic network, Recon3D, we can expect that the neighborhood will encompass both proteins and metabolites.
+(R)-methylmalonyl-CoA CoA-carbonylmutase (MMUT) (an [isomerase in the TCA cycle](https://www.genome.jp/entry/R00833)) mutations are the root cause of a large fraction of MMA cases. To get warmed up on network visualization we can create a neighborhood around MMUT encompassing both MMUT's regulators and its downstream targets. Since the `NapistuGraph` we'll be querying includes a detailed human metabolic network, Recon3D, we can expect that the neighborhood will encompass both proteins and metabolites.
 
 ```{r yfg_selection}
 # choose your favorite gene
@@ -72,44 +101,180 @@ matching_ids <- napistu$ontologies$id_tables$filter_id_table(
 S_ID <- purrr::pluck(matching_ids, "s_id")
 ```
 
-```{r neighborhoods}
-neighborhoods <- napistu.r::create_neighborhood_table(
-  napistu_list,
-  species_id = S_ID,
-  network_type = "hourglass",
-  max_steps = 4L,
-  max_neighbors = 40L
-)
+```{r create_neighborhood_plots}
+neighborhood_settings <- tibble::tribble(
+  ~ alias, ~ max_steps, ~ max_neighbors, ~ network_layout, ~ out_width, ~ out_height,
+  "big_picture", 5L, 200L, "kk", 20, 20,
+  "close_up", 4L, 40L, "fr", 10, 10
+) %>%
+  dplyr::mutate(
+    png_name = glue::glue("{YFG_ENSG}_{alias}_neighborhood.png"),
+    png_path = file.path(NETWORK_PLOTS_OUTDIR, png_name),
+    outfile_exists = file.exists(png_path) 
+  )
+
+if (OVERWRITE) {
+  neighborhoods_to_plot <- neighborhood_settings
+} else {
+  neighborhoods_to_plot <- neighborhood_settings %>%
+    dplyr::filter(!outfile_exists)
+}
+
+for (i in seq_len(nrow(neighborhoods_to_plot))) {
+  
+  settings <- neighborhoods_to_plot %>%
+    dplyr::slice(i) %>%
+    as.list()
+  
+  cli::cli_alert_info("Creating a neihborhood around {.field {YFG_ENSG}/{S_ID}} using {.field {settings$alias}} settings")
+  
+  neighborhoods <- napistu.r::create_neighborhood_table(
+    napistu_list,
+    species_id = S_ID,
+    network_type = "hourglass",
+    max_steps = settings$max_steps,
+    max_neighbors = settings$max_neighbors
+  )
+  
+  neighborhood_grob <- napistu.r::plot_neighborhoods(
+    napistu_list,
+    neighborhoods,
+    # ignore weights until https://github.com/napistu/napistu/issues/15 is addressed
+    edge_weights = NA,
+    network_layout = settings$network_layout
+  )
+  
+  ggplot2::ggsave(plot = neighborhood_grob, filename = settings$png_path, width = settings$out_width, height = settings$out_height)
+}
 ```
 
-```{r plot_neighborhoods, fig.height = 10, fig.width = 10}
-neighborhoods_plot <- napistu.r::plot_neighborhoods(
-  napistu_list,
-  neighborhoods
-)
+```{r results='asis'}
+generate_neighborhood_plot_blocks <- function(neighborhood_settings) {
+  for (i in 1:nrow(neighborhood_settings)) {
+    row <- neighborhood_settings[i, ]
+    
+    # Section header
+    cat("### ", tools::toTitleCase(gsub("_", " ", row$alias)), "\n\n")
+    
+    # Display image
+    cat('<img src="', row$png_path, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+  }
+}
+
+generate_neighborhood_plot_blocks(neighborhood_settings)
 ```
 
 ## Defining subgraphs based on multiomic signatures
 
-```{r}
+```{r select_enrichments}
+TRAITS <- c(
+  "OHCblPlus",
+  "MMA_urine"
+)
+MEASURES <- c("log10_p", "stat")
+MODALITIES <- c("transcriptomics", "proteomics")
+
+attributes_of_interest <- tidyr::expand_grid(trait = TRAITS, measure = MEASURES, modality = MODALITIES) %>%
+  dplyr::mutate(attr_name = glue::glue("{measure}_{trait}_{modality}"))
+
 ppr_enriched_vertices <- ppr_results %>%
+  dplyr::filter(
+    q_value < 0.1,
+    is_enriched,
+    attribute %in% attributes_of_interest$attr_name
+  ) %>%
   tidyr::nest(attr_scores = -attribute)
+```
 
-scores <- ppr_enriched_vertices %>%
-  dplyr::filter(attribute == "est_OHCblPlus_transcriptomics") %>%
-  purrr::pluck("attr_scores")
+```{r create_subgraph_plots}
+ppr_subgraph_settings <- ppr_enriched_vertices %>%
+  dplyr::mutate(
+    # plot the two largest weakly connected components of the induced subgraph
+    # formed from vertices with net propagation enrichment
+    png_name_1 = glue::glue("{attribute}_component_1.png"),
+    png_path_1 = file.path(NETWORK_PLOTS_OUTDIR, png_name_1),
+    # only check for existence of component 1 because there may only be 1 component
+    outfile_exists = file.exists(png_path_1)
+  )
 
-subgraph <- napistu.r::define_subgraphs(
-  napistu_list,
-  subgraph_vertices = scores[[1]]$name
-)
+if (OVERWRITE) {
+  subgraphs_to_plot <- ppr_subgraph_settings
+} else {
+  subgraphs_to_plot <- ppr_subgraph_settings %>%
+    dplyr::filter(!outfile_exists)
+}
 
-component_r_graph <- napistu.r::convert_napistu_graph(subgraph[[1]]$component_graph, napistu_list)
-component_r_graph$vertices
+for (i in seq_len(nrow(subgraphs_to_plot))) {
+  
+  settings <- subgraphs_to_plot %>%
+    dplyr::slice(i) %>%
+    as.list()
+  
+  cli::cli_alert_info("Creating subgraph plots based on vertices enriched for {.field {settings$attribute}} signal")
 
-napistu.r::plot_subgraph(
-  napistu_list,
-  subgraph
-)
+  scores <- settings$attr_scores[[1]]
+  
+  # create an induced subgraph and select the largest weakly connected component
+  
+  subgraph <- napistu.r::define_subgraphs(
+    napistu_list,
+    subgraph_vertices = scores$vertex_name,
+    max_components = MAX_SUBGRAPH_COMPONENTS
+  )
+  
+  for (i in seq_along(subgraph)) {
+    
+    n_vertices <- length(subgraph[[i]]$component_graph$vs$get_attribute_values("name"))
+    if (i != 1 && n_vertices < 50) {
+      next
+    }
+    
+    vertex_size <- 1/log(n_vertices, base = 4) * 2
+    edge_width <- 1/log(n_vertices, base = 4) / 4
+    # TO DO - try dropping edges outright once R package is reinstalled
+    # or hide edges below a minimum weight value
+    
+    subgraph_grob <- napistu.r::plot_one_component(
+      napistu_list,
+      subgraph[[i]],
+      network_layout = "kk",
+      edge_weights = NA,
+      vertex_size = vertex_size,
+      edge_width = edge_width
+    )
+    
+    outfile <- stringr::str_replace(settings$png_path_1, "_1.png", glue::glue("_{i}.png"))
+    
+    if (n_vertices > 1000) {
+      out_width <- 20
+      out_height <- 20
+    } else {
+      out_width <- 10
+      out_height <- 10
+    }
+    
+    ggplot2::ggsave(
+      plot = subgraph_grob,
+      filename = outfile,
+      width = out_width,
+      height = out_height
+    )
+  }
+}
+```
 
+```{r results='asis'}
+generate_subgraph_plot_blocks <- function(ppr_subgraph_settings) {
+  for (i in 1:nrow(ppr_subgraph_settings)) {
+    row <- ppr_subgraph_settings[i, ]
+    
+    # Section header
+    cat("### ", tools::toTitleCase(gsub("_", " ", row$attribute)), "\n\n")
+    
+    # Display image
+    cat('<img src="', row$png_path_1, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+  }
+}
+
+generate_subgraph_plot_blocks(ppr_subgraph_settings)
 ```
