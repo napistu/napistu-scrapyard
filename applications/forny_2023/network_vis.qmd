@@ -3,15 +3,21 @@ title: "PPR Network Visualization"
 author: "Shackett"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 format:
-  html:
-    embed-resources: true
-    code-fold: true
-    code-summary: "Show the code"
+#  html:
+#    embed-resources: true
+#    code-fold: true
+#    code-summary: "Show the code"
+#    toc: true
+#    theme: minty
+#    highlight: tango
+#    code-block-bg: true
+#    code-block-border-left: "#5BB867"
+  pdf:
     toc: true
-    theme: minty
     highlight: tango
     code-block-bg: true
-    code-block-border-left: "#5BB867"
+    execute:
+      echo: false  # Hide code in PDF
 ---
 
 ```{r config, include = FALSE}
@@ -216,8 +222,14 @@ generate_neighborhood_plot_blocks <- function(neighborhood_settings) {
     # Section header
     cat("### ", tools::toTitleCase(gsub("_", " ", row$alias)), "\n\n")
     
-    # Display image
-    cat('<img src="', row$png_path, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    # Display image based on output format
+    if (knitr::is_latex_output()) {
+      # For PDF output
+      cat("![](", row$png_path, "){width=100%}\n\n", sep = "")
+    } else {
+      # For HTML output
+      cat('<img src="', row$png_path, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    }
   }
 }
 
@@ -225,6 +237,16 @@ generate_neighborhood_plot_blocks(neighborhood_settings)
 ```
 
 ## Defining subgraphs based on multiomic signatures
+
+Now we can visualize network signatures defined in `napistu_forny.ipynb`. In that notebook we took the regression and factor analysis summaries from `forny.ipynb` and mounted them on our `NapistuGraph` network graph. Then we applied network propagation with personalized pagerank to determine how signals starting from differentially expressed vertices converged on upstream regulators. Finally, to correct for topological biases we applied vertex permutation to identify vertices which are statistically enriched.
+
+To visualize these enriched signatures we will:
+
+1. select a trait of interest (here, OHCblPlus and MMA_urine), the measure used for propagation (here, log10 p-values and/or Z-statistics), and the modalities of interest (transcriptomics and proteomics).
+2. load the raw Z-statistics for each trait and modalities (i.e., vertex-level Z-statistics for the OHCblPlus effect in proteins)
+3. Using the pagerank results filter to just the vertices which enriched for the observed signal relative to the vertex permutation null.
+4. Select the subgraph containing the enriched vertices (and the edges connecting them).
+5. Visualize the largest weakly connected components of the subgraph overlaid with the vertex level Z-statistics.
 
 ```{r select_enrichments}
 TRAITS <- c(
@@ -352,13 +374,18 @@ for (i in seq_len(nrow(subgraphs_to_plot))) {
 ```{r results='asis'}
 generate_subgraph_plot_blocks <- function(ppr_subgraph_settings) {
   for (i in 1:nrow(ppr_subgraph_settings)) {
-    row <- ppr_subgraph_settings[i, ]
+    entry <- ppr_subgraph_settings[i, ]
     
     # Section header
-    cat("### ", tools::toTitleCase(gsub("_", " ", row$attribute)), "\n\n")
+    cat("### ", tools::toTitleCase(gsub("_", " ", entry$attribute)), "\n\n")
     
-    # Display image
-    cat('<img src="', row$png_path_1, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    if (knitr::is_latex_output()) {
+      # For PDF output
+      cat("![](", entry$png_path_1, "){width=100%}\n\n", sep = "")
+    } else {
+      # For HTML output
+      cat('<img src="', entry$png_path_1, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    }
   }
 }
 
