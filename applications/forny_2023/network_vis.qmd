@@ -143,27 +143,82 @@ score_overlay <- var_level_results %>%
     score = pmin(pmax(score, -1*Z_MAX), Z_MAX)
   )
 
+formatted_overlaying_phenotype <- stringr::str_replace_all(OVERLAYING_PHENOTYPE, "_", " ")
+
 score_palette <- ggplot2::scale_color_gradient2(
-  glue::glue("{OVERLAYING_PHENOTYPE} Z-score"),
+  glue::glue("{formatted_overlaying_phenotype} Z-score"),
   low = "steelblue1",
   mid = "black",
   high = "yellow",
   midpoint = 0
 )
+
+fine_tune_theming <- function (grob, plot_scale) {
+  
+  grob + ggplot2::guides(
+        fill = ggplot2::guide_legend(ncol = 2),
+        shape = ggplot2::guide_legend(
+          ncol = 1,
+          override.aes = list(size = 5)
+        ),
+        color = ggplot2::guide_colorbar(
+          direction = "vertical",
+          title.position = "left",
+          title.hjust = 1
+        )
+      ) +
+      ggplot2::theme(
+        plot.title = ggtext::element_markdown(size = 12*plot_scale, lineheight = 1.2*plot_scale),
+        plot.subtitle = ggtext::element_markdown(
+          size = 11*plot_scale,
+          lineheight = 1.2*plot_scale,
+          margin = ggplot2::margin(b = 5 * plot_scale, t = 5 * plot_scale)
+        ),
+        legend.title = ggplot2::element_text(
+          vjust = 1,
+          face = "bold",
+          size = 7 * plot_scale  # Increase title size
+        ),
+        legend.text = ggplot2::element_text(size = 6 * plot_scale),
+        legend.key.size = ggplot2::unit(0.25 * plot_scale, "cm"),  
+        legend.key.width = ggplot2::unit(0.3 * plot_scale, "cm"), 
+        legend.key.height = ggplot2::unit(0.4 * plot_scale, "cm"), 
+        plot.margin = ggplot2::margin(5*plot_scale, 5*plot_scale, 10*plot_scale, 5*plot_scale, "pt")
+      )
+  
+  ggplot2::theme(
+        plot.title = ggtext::element_markdown(size = 12*plot_scale, lineheight = 1.2*plot_scale),
+        plot.subtitle = ggtext::element_markdown(
+          size = 11*plot_scale,
+          lineheight = 1.2*plot_scale,
+          margin = ggplot2::margin(b = 5 * plot_scale, t = 5 * plot_scale)
+        ),
+        legend.title = ggplot2::element_text(
+          vjust = 1,
+          face = "bold",
+          size = 7 * plot_scale  # Increase title size
+        ),
+        legend.text = ggplot2::element_text(size = 6 * plot_scale),
+        legend.key.size = ggplot2::unit(0.25 * plot_scale, "cm"),  
+        legend.key.width = ggplot2::unit(0.3 * plot_scale, "cm"), 
+        legend.key.height = ggplot2::unit(0.4 * plot_scale, "cm"), 
+        plot.margin = ggplot2::margin(5*plot_scale, 5*plot_scale, 10*plot_scale, 5*plot_scale, "pt")
+      )
+}
 ```
 
 ```{r create_neighborhood_plots}
 neighborhood_settings <- tibble::tribble(
-  ~ alias, ~ max_steps, ~ max_neighbors, ~ network_layout, ~ out_width, ~ out_height, ~ max_display_weight,
-  "big_picture", 4L, 2000L, "kk", 20, 20, 1,
-  "mid_zoom", 3L, 500L, "kk", 15, 15, 1.02,
-  "close_up", 2L, 100L, "kk", 10, 10, 1.1
+  ~ alias, ~ max_steps, ~ max_neighbors, ~ network_layout, ~ out_width, ~ max_display_weight,
+  "big_picture", 4L, 2000L, "kk", 20, 1,
+  "mid_zoom", 3L, 500L, "kk", 15, 1.02,
+  "close_up", 2L, 100L, "kk", 12, 1.1
 ) %>%
   dplyr::mutate(
     png_name = glue::glue("{YFG_ENSG}_{alias}_neighborhood.png"),
     png_path = file.path(NETWORK_PLOTS_OUTDIR, png_name),
     outfile_exists = file.exists(png_path),
-    max_labeled_species = (out_width * out_height)
+    max_labeled_species = (out_width * out_width)
   )
 
 if (OVERWRITE) {
@@ -178,6 +233,9 @@ for (i in seq_len(nrow(neighborhoods_to_plot))) {
   settings <- neighborhoods_to_plot %>%
     dplyr::slice(i) %>%
     as.list()
+  
+  # define how aesthetics should scale
+  plot_scale <- settings$out_width / 8 # define plot relative to a fixed base size
   
   cli::cli_alert_info("Creating a neihborhood around {.field {YFG_ENSG}/{S_ID}} using {.field {settings$alias}} settings")
   
@@ -195,7 +253,7 @@ for (i in seq_len(nrow(neighborhoods_to_plot))) {
     neighborhoods,
     network_layout = settings$network_layout,
     score_overlay = score_overlay,
-    score_label = glue::glue("{OVERLAYING_PHENOTYPE} Z-scores"),
+    score_label = glue::glue("{formatted_overlaying_phenotype}\nZ-scores"),
     score_palette = score_palette,
     join_scores_on = "name",
     vertex_size = 5,
@@ -205,11 +263,13 @@ for (i in seq_len(nrow(neighborhoods_to_plot))) {
     target_plot_width = settings$out_width
   )
   
+  refined_grob <- fine_tune_theming(neighborhood_grob, plot_scale)
+  
   ggplot2::ggsave(
-    plot = neighborhood_grob,
+    plot = refined_grob,
     filename = settings$png_path,
     width = settings$out_width,
-    height = settings$out_height
+    height = settings$out_width # square plot
   )
 }
 ```
@@ -299,14 +359,6 @@ if (OVERWRITE) {
     dplyr::filter(!outfile_exists)
 }
 
-score_palette <- ggplot2::scale_color_gradient2(
-  glue::glue("Z-score"),
-  low = "steelblue1",
-  mid = "black",
-  high = "yellow",
-  midpoint = 0
-)
-
 for (i in seq_len(nrow(subgraphs_to_plot))) {
   
   settings <- subgraphs_to_plot %>%
@@ -316,7 +368,18 @@ for (i in seq_len(nrow(subgraphs_to_plot))) {
   cli::cli_alert_info("Creating subgraph plots based on vertices enriched for {.field {settings$attribute}} signal")
 
   scores <- settings$attr_scores[[1]]
+  overlay_with <- settings$overlay_with[[1]] %>%
+    stringr::str_replace("^stat_", "") %>%
+    stringr::str_replace_all("_", " ")
   score_overlay <- settings$score_overlay[[1]]
+  
+  score_palette <- ggplot2::scale_color_gradient2(
+    glue::glue("{overlay_with}\nZ-score"),
+    low = "steelblue1",
+    mid = "black",
+    high = "yellow",
+    midpoint = 0
+  )
   
   # create an induced subgraph and select the largest weakly connected component
   
@@ -333,15 +396,18 @@ for (i in seq_len(nrow(subgraphs_to_plot))) {
       next
     }
     
-    vertex_size <- 1/log(n_vertices, base = 4) * 3
+    # use smaller text on a bigger plot with more labels for larger graphs
+    vertex_size <- 1/log(n_vertices, base = 4) * 5
     edge_width <- 1/log(n_vertices, base = 4) / 4
+    
     if (n_vertices > 1000) {
-      out_width <- 20
-      out_height <- 20
+      plot_scale <- 2
     } else {
-      out_width <- 10
-      out_height <- 10
+      plot_scale <- 1
     }
+    
+    out_width <- 6 * plot_scale + 2
+    out_height <- 6 * plot_scale + 2
     max_labeled_species <- out_width * out_height
     
     subgraph_grob <- napistu.r::plot_one_component(
@@ -357,12 +423,15 @@ for (i in seq_len(nrow(subgraphs_to_plot))) {
       show_edges_if = list(weight = list(cutoff = 1.02, retain = "below")),
       max_labeled_species = max_labeled_species,
       target_plot_width = out_width
-    ) + ggplot2::labs(subtitle = glue::glue("based on signals converging upstream of {settings$attribute}"))
+    ) +
+      ggplot2::labs(subtitle = glue::glue("based on signals converging upstream of **{settings$attribute}**"))
+    
+    refined_grob <- fine_tune_theming(subgraph_grob, plot_scale)
     
     outfile <- stringr::str_replace(settings$png_path_1, "_1.png", glue::glue("_{j}.png"))
     
     ggplot2::ggsave(
-      plot = subgraph_grob,
+      plot = refined_grob,
       filename = outfile,
       width = out_width,
       height = out_height
