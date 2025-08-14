@@ -1,0 +1,9 @@
+python_config:
+  virtualenv: ".venv"
+assets_config:
+  sbml_dfs: '/Users/sean/Desktop/DATA/Forny2023/sbml_dfs_w_data.pkl'
+  napistu_graph: '/Users/sean/Desktop/DATA/Forny2023/napistu_graph_w_data.pkl'
+  precomputed_distances: '~/Desktop/DATA/napistu_data/human_consensus_w_distances/precomputed_distances.parquet'
+  species_identifiers: '~/Desktop/DATA/napistu_data/human_consensus_w_distances/species_identifiers.tsv'
+  reactions_source_total_counts: '~/Desktop/DATA/napistu_data/human_consensus_w_distances/reactions_source_total_counts.tsv'
+  

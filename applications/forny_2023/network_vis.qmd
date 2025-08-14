@@ -1,0 +1,443 @@
+---
+title: "PPR Network Visualization"
+author: "Shackett"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+format:
+#  html:
+#    embed-resources: true
+#    code-fold: true
+#    code-summary: "Show the code"
+#    toc: true
+#    theme: minty
+#    highlight: tango
+#    code-block-bg: true
+#    code-block-border-left: "#5BB867"
+  pdf:
+    toc: true
+    highlight: tango
+    code-block-bg: true
+    execute:
+      echo: false  # Hide code in PDF
+---
+
+```{r config, include = FALSE}
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(napistu.r))
+
+NAPISTU_R_CONFIG_NAME <- "napistu_r_config.yaml"
+PROJECT_DIR <- "~/Desktop/DATA/Forny2023"
+PPR_RESULTS_OUTFILE <- "ppr_results.tsv"
+ANNOTATED_VERTICES_OUTFILE <- "annotated_vertices.tsv"
+NETWORK_PLOTS_OUTDIR_NAME <- "network_plots"
+OVERWRITE <- FALSE
+
+checkmate::assert_file_exists(NAPISTU_R_CONFIG_NAME)
+checkmate::assert_directory_exists(PROJECT_DIR)
+checkmate::assert_string(PPR_RESULTS_OUTFILE)
+checkmate::assert_string(ANNOTATED_VERTICES_OUTFILE)
+checkmate::assert_string(NETWORK_PLOTS_OUTDIR_NAME)
+checkmate::assert_logical(OVERWRITE, len = 1)
+
+PPR_RESULTS_PATH <- file.path(PROJECT_DIR, PPR_RESULTS_OUTFILE)
+ANNOTATED_VERTICES_PATH <- file.path(PROJECT_DIR, ANNOTATED_VERTICES_OUTFILE)
+# use the current directory and add plots to gitignore
+# that way the pngs generated can be referenced and embedded in the rendered html
+NETWORK_PLOTS_OUTDIR <- NETWORK_PLOTS_OUTDIR_NAME
+
+checkmate::assert_file_exists(PPR_RESULTS_PATH)
+checkmate::assert_file_exists(ANNOTATED_VERTICES_PATH)
+checkmate::assert_directory_exists(NETWORK_PLOTS_OUTDIR_NAME)
+
+# settings
+MAX_SUBGRAPH_COMPONENTS <- 2L
+```
+
+Using Napistu from R involves creating a configuration which is used to set the Python environment used by reticulate and to load files produced by the Napistu python library. The assets that are needed for network analysis in R are:
+
+1. An `SBML_dfs` object which serves as a relational database representation of the pathway representation.
+2. A `NapistuGraph` object which is an `igraph.Graph` subclass formed by translating the `SBML_dfs` using a specified wiring strategy and attributes like edge weights.
+3. A species identifiers table which contains the systematic identifiers for the molecular species in the model.
+4. Optionally, precomputed distances between pairs of molecular species. This can greatly speed up calculations of shortest paths which is essential when calculating many such paths. In this notebook, we'll use the precomputed distances to calculate the molecular neighborhood around MMUT.
+
+```{python, eval = FALSE}
+from napistu.gcs import downloads
+
+_ = downloads.load_public_napistu_asset(
+    asset = "human_consensus_w_distances",
+    data_dir = NAPISTU_DATA_DIR,
+    subasset = "sbml_dfs"
+)
+```
+
+```{r setup_napistu_py}
+# load the sbml_dfs, network and other assets and bind a reticulate environment
+# with napistu-py
+napistu_config <- napistu.r::load_napistu_config(NAPISTU_R_CONFIG_NAME)
+setup_napistu_list(napistu_config, skip_validation = TRUE)
+
+# reticulate binding for the Napistu Python package
+napistu <- napistu_list$python_modules$napistu
+
+# `setup_napistu_list` creates a napistu_list object full of goodies
+napistu_list
+```
+
+```{r refine_inputs}
+# drop some uninformative pathways from the source counts table so they aren't highlighted in the network graph
+# this could be handled upstream, but its easy enough to patch it here
+napistu_list$reactions_source_total_counts <- napistu_list$reactions_source_total_counts %>%
+  dplyr::filter(!(pathway_id %in% c("uncompartmentalization")), !stringr::str_detect(pathway_id, "/cache/"))
+```
+
+```{r load_ppr}
+# load PPR scores and significance based on vertex permutation
+ppr_results <- readr::read_tsv(PPR_RESULTS_PATH, show_col_types = FALSE)
+```
+
+## Defining the neighborhood of MMUT
+
+(R)-methylmalonyl-CoA CoA-carbonylmutase (MMUT) (an [isomerase in the TCA cycle](https://www.genome.jp/entry/R00833)) mutations are the root cause of a large fraction of MMA cases. To get warmed up on network visualization we can create a neighborhood around MMUT encompassing both MMUT's regulators and its downstream targets. Since the `NapistuGraph` we'll be querying includes a detailed human metabolic network, Recon3D, we can expect that the neighborhood will encompass both proteins and metabolites.
+
+```{r yfg_selection}
+# choose your favorite gene
+YFG_ENSG <- "ENSG00000146085"
+OVERLAYING_PHENOTYPE <- "MMA_urine"
+
+matching_ids <- napistu$ontologies$id_tables$filter_id_table(
+  id_table = napistu_list$species_identifiers,
+  identifiers = YFG_ENSG,
+  bqbs = c("BQB_IS", "BQB_IS_ENCODED_BY")
+)
+
+S_ID <- purrr::pluck(matching_ids, "s_id")
+Z_MAX <- 5
+
+compartmentalized_species <- napistu_list$sbml_dfs$compartmentalized_species %>%
+    dplyr::select(sc_name, s_id, c_id) %>%
+    tibble::rownames_to_column("sc_id") %>%
+    tibble::as_tibble()
+
+var_level_results <- napistu_list$sbml_dfs$species_data[["var_level_results"]] %>%
+  tibble::rownames_to_column("s_id") %>%
+  dplyr::left_join(compartmentalized_species, by = "s_id") %>%
+  dplyr::relocate(sc_id, sc_name, c_id) %>%
+  tibble::as_tibble() %>%
+  dplyr::rename(name = sc_id)
+  
+
+# measure_template <- "stat_OHCblPlus_{modality}"
+measure_template <- "stat_{phenotype}_{modality}"
+
+target_measures <- tibble::tibble(modality = c("transcriptomics", "proteomics")) %>%
+  dplyr::mutate(measure = glue::glue(measure_template, phenotype = OVERLAYING_PHENOTYPE)) %>%
+  tibble::deframe()
+
+score_overlay <- var_level_results %>%
+  dplyr::select(name, !!!rlang::syms(target_measures)) %>%
+  dplyr::mutate(
+    score = dplyr::case_when(
+      proteomics != 0 ~ proteomics,
+      transcriptomics != 0 ~ transcriptomics,
+      .default = NA_real_
+    ),
+    score = pmin(pmax(score, -1*Z_MAX), Z_MAX)
+  )
+
+formatted_overlaying_phenotype <- stringr::str_replace_all(OVERLAYING_PHENOTYPE, "_", " ")
+
+score_palette <- ggplot2::scale_color_gradient2(
+  glue::glue("{formatted_overlaying_phenotype} Z-score"),
+  low = "steelblue1",
+  mid = "black",
+  high = "yellow",
+  midpoint = 0
+)
+
+fine_tune_theming <- function (grob, plot_scale) {
+  
+  grob + ggplot2::guides(
+        fill = ggplot2::guide_legend(ncol = 2),
+        shape = ggplot2::guide_legend(
+          ncol = 1,
+          override.aes = list(size = 5)
+        ),
+        color = ggplot2::guide_colorbar(
+          direction = "vertical",
+          title.position = "left",
+          title.hjust = 1
+        )
+      ) +
+      ggplot2::theme(
+        plot.title = ggtext::element_markdown(size = 12*plot_scale, lineheight = 1.2),
+        plot.subtitle = ggtext::element_markdown(
+          size = 11*plot_scale,
+          lineheight = 1.2,
+          margin = ggplot2::margin(b = 5 * plot_scale, t = 5 * plot_scale)
+        ),
+        legend.title = ggplot2::element_text(
+          vjust = 1,
+          face = "bold",
+          size = 7 * plot_scale  # Increase title size
+        ),
+        legend.text = ggplot2::element_text(size = 6 * plot_scale),
+        legend.key.size = ggplot2::unit(0.25 * plot_scale, "cm"),  
+        legend.key.width = ggplot2::unit(0.3 * plot_scale, "cm"), 
+        legend.key.height = ggplot2::unit(0.4 * plot_scale, "cm"), 
+        plot.margin = ggplot2::margin(5*plot_scale, 5*plot_scale, 10*plot_scale, 5*plot_scale, "pt")
+      )
+}
+```
+
+```{r create_neighborhood_plots}
+neighborhood_settings <- tibble::tribble(
+  ~ alias, ~ max_steps, ~ max_neighbors, ~ network_layout, ~ out_width, ~ max_display_weight,
+  "big_picture", 4L, 2000L, "kk", 20, 1,
+  "mid_zoom", 3L, 500L, "kk", 15, 1.02,
+  "close_up", 2L, 100L, "kk", 12, 1.1
+) %>%
+  dplyr::mutate(
+    png_name = glue::glue("{YFG_ENSG}_{alias}_neighborhood.png"),
+    png_path = file.path(NETWORK_PLOTS_OUTDIR, png_name),
+    outfile_exists = file.exists(png_path),
+    max_labeled_species = (out_width * out_width)
+  )
+
+if (OVERWRITE) {
+  neighborhoods_to_plot <- neighborhood_settings
+} else {
+  neighborhoods_to_plot <- neighborhood_settings %>%
+    dplyr::filter(!outfile_exists)
+}
+
+for (i in seq_len(nrow(neighborhoods_to_plot))) {
+  
+  settings <- neighborhoods_to_plot %>%
+    dplyr::slice(i) %>%
+    as.list()
+  
+  # define how aesthetics should scale
+  plot_scale <- settings$out_width / 8 # define plot relative to a fixed base size
+  
+  cli::cli_alert_info("Creating a neihborhood around {.field {YFG_ENSG}/{S_ID}} using {.field {settings$alias}} settings")
+  
+  neighborhoods <- napistu.r::create_neighborhood_table(
+    napistu_list,
+    species_id = S_ID,
+    network_type = "hourglass",
+    max_steps = settings$max_steps,
+    max_neighbors = settings$max_neighbors
+  )
+  
+  # add attribute overlay - overlay
+  neighborhood_grob <- napistu.r::plot_neighborhoods(
+    napistu_list,
+    neighborhoods,
+    network_layout = settings$network_layout,
+    score_overlay = score_overlay,
+    score_label = glue::glue("{formatted_overlaying_phenotype}\nZ-scores"),
+    score_palette = score_palette,
+    join_scores_on = "name",
+    vertex_size = 5,
+    edge_width = 0.1,
+    show_edges_if = list(weight = list(cutoff = settings$max_display_weight, retain = "below")),
+    max_labeled_species = settings$max_labeled_species,
+    target_plot_width = settings$out_width
+  )
+  
+  refined_grob <- fine_tune_theming(neighborhood_grob, plot_scale)
+  
+  ggplot2::ggsave(
+    plot = refined_grob,
+    filename = settings$png_path,
+    width = settings$out_width,
+    height = settings$out_width # square plot
+  )
+}
+```
+
+```{r results='asis'}
+generate_neighborhood_plot_blocks <- function(neighborhood_settings) {
+  for (i in 1:nrow(neighborhood_settings)) {
+    row <- neighborhood_settings[i, ]
+    
+    # Section header
+    cat("### ", tools::toTitleCase(gsub("_", " ", row$alias)), "\n\n")
+    
+    # Display image based on output format
+    if (knitr::is_latex_output()) {
+      # For PDF output
+      cat("![](", row$png_path, "){width=100%}\n\n", sep = "")
+    } else {
+      # For HTML output
+      cat('<img src="', row$png_path, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    }
+  }
+}
+
+generate_neighborhood_plot_blocks(neighborhood_settings)
+```
+
+## Defining subgraphs based on multiomic signatures
+
+Now we can visualize network signatures defined in `napistu_forny.ipynb`. In that notebook we took the regression and factor analysis summaries from `forny.ipynb` and mounted them on our `NapistuGraph` network graph. Then we applied network propagation with personalized pagerank to determine how signals starting from differentially expressed vertices converged on upstream regulators. Finally, to correct for topological biases we applied vertex permutation to identify vertices which are statistically enriched.
+
+To visualize these enriched signatures we will:
+
+1. select a trait of interest (here, OHCblPlus and MMA_urine), the measure used for propagation (here, log10 p-values and/or Z-statistics), and the modalities of interest (transcriptomics and proteomics).
+2. load the raw Z-statistics for each trait and modalities (i.e., vertex-level Z-statistics for the OHCblPlus effect in proteins)
+3. Using the pagerank results filter to just the vertices which enriched for the observed signal relative to the vertex permutation null.
+4. Select the subgraph containing the enriched vertices (and the edges connecting them).
+5. Visualize the largest weakly connected components of the subgraph overlaid with the vertex level Z-statistics.
+
+```{r select_enrichments}
+TRAITS <- c(
+  "OHCblPlus",
+  "MMA_urine"
+)
+MEASURES <- c("log10_p", "stat")
+MODALITIES <- c("transcriptomics", "proteomics")
+
+attributes_of_interest <- tidyr::expand_grid(trait = TRAITS, measure = MEASURES, modality = MODALITIES) %>%
+  dplyr::mutate(
+    attr_name = glue::glue("{measure}_{trait}_{modality}"),
+    overlay_with = glue::glue("stat_{trait}_{modality}")
+  )
+
+# add score overlays for each trait
+
+overlay_data_nest <- var_level_results %>%
+  dplyr::select(name, !!!rlang::syms(unique(attributes_of_interest$overlay_with))) %>%
+  tidyr::gather(overlay_with, score, -name) %>%
+  dplyr::filter(score != 0) %>%
+  tidyr::nest(score_overlay = -overlay_with)
+
+ppr_enriched_vertices <- ppr_results %>%
+  dplyr::filter(
+    q_value < 0.1,
+    is_enriched,
+    attribute %in% attributes_of_interest$attr_name
+  ) %>%
+  tidyr::nest(attr_scores = -attribute) %>%
+  dplyr::left_join(attributes_of_interest %>% dplyr::select(attr_name, overlay_with), by = c("attribute" = "attr_name")) %>%
+  dplyr::left_join(overlay_data_nest, by = "overlay_with")
+```
+
+```{r create_subgraph_plots}
+ppr_subgraph_settings <- ppr_enriched_vertices %>%
+  dplyr::mutate(
+    # plot the two largest weakly connected components of the induced subgraph
+    # formed from vertices with net propagation enrichment
+    png_name_1 = glue::glue("{attribute}_component_1.png"),
+    png_path_1 = file.path(NETWORK_PLOTS_OUTDIR, png_name_1),
+    # only check for existence of component 1 because there may only be 1 component
+    outfile_exists = file.exists(png_path_1)
+  )
+
+if (OVERWRITE) {
+  subgraphs_to_plot <- ppr_subgraph_settings
+} else {
+  subgraphs_to_plot <- ppr_subgraph_settings %>%
+    dplyr::filter(!outfile_exists)
+}
+
+for (i in seq_len(nrow(subgraphs_to_plot))) {
+  
+  settings <- subgraphs_to_plot %>%
+    dplyr::slice(i) %>%
+    as.list()
+  
+  cli::cli_alert_info("Creating subgraph plots based on vertices enriched for {.field {settings$attribute}} signal")
+
+  scores <- settings$attr_scores[[1]]
+  overlay_with <- settings$overlay_with[[1]] %>%
+    stringr::str_replace("^stat_", "") %>%
+    stringr::str_replace_all("_", " ")
+  score_overlay <- settings$score_overlay[[1]]
+  
+  score_palette <- ggplot2::scale_color_gradient2(
+    glue::glue("{overlay_with}\nZ-score"),
+    low = "steelblue1",
+    mid = "black",
+    high = "yellow",
+    midpoint = 0
+  )
+  
+  # create an induced subgraph and select the largest weakly connected component
+  
+  subgraph <- napistu.r::define_subgraphs(
+    napistu_list,
+    subgraph_vertices = scores$vertex_name,
+    max_components = MAX_SUBGRAPH_COMPONENTS
+  )
+  
+  for (j in seq_along(subgraph)) {
+    
+    n_vertices <- length(subgraph[[j]]$component_graph$vs$get_attribute_values("name"))
+    if (j != 1 && n_vertices < 50) {
+      next
+    }
+    
+    # use smaller text on a bigger plot with more labels for larger graphs
+    vertex_size <- 1/log(n_vertices, base = 4) * 5
+    edge_width <- 1/log(n_vertices, base = 4) / 4
+    
+    if (n_vertices > 1000) {
+      plot_scale <- 2
+    } else {
+      plot_scale <- 1
+    }
+    
+    out_width <- 6 * plot_scale + 2
+    out_height <- 6 * plot_scale + 2
+    max_labeled_species <- out_width * out_height
+    
+    subgraph_grob <- napistu.r::plot_one_component(
+      napistu_list,
+      subgraph[[j]],
+      network_layout = "kk",
+      edge_weights = NA,
+      vertex_size = vertex_size,
+      edge_width = edge_width,
+      score_overlay = score_overlay,
+      score_palette = score_palette,
+      join_scores_on = "name",
+      show_edges_if = list(weight = list(cutoff = 1.02, retain = "below")),
+      max_labeled_species = max_labeled_species,
+      target_plot_width = out_width
+    ) +
+      ggplot2::labs(subtitle = glue::glue("based on signals converging upstream of **{settings$attribute}**"))
+    
+    refined_grob <- fine_tune_theming(subgraph_grob, plot_scale)
+    
+    outfile <- stringr::str_replace(settings$png_path_1, "_1.png", glue::glue("_{j}.png"))
+    
+    ggplot2::ggsave(
+      plot = refined_grob,
+      filename = outfile,
+      width = out_width,
+      height = out_height
+    )
+  }
+}
+```
+
+```{r results='asis'}
+generate_subgraph_plot_blocks <- function(ppr_subgraph_settings) {
+  for (i in 1:nrow(ppr_subgraph_settings)) {
+    entry <- ppr_subgraph_settings[i, ]
+    
+    # Section header
+    cat("### ", tools::toTitleCase(gsub("_", " ", entry$attribute)), "\n\n")
+    
+    if (knitr::is_latex_output()) {
+      # For PDF output
+      cat("![](", entry$png_path_1, "){width=100%}\n\n", sep = "")
+    } else {
+      # For HTML output
+      cat('<img src="', entry$png_path_1, '" style="width: 100%; display: block; margin: auto;" />\n\n', sep = "")
+    }
+  }
+}
+
+generate_subgraph_plot_blocks(ppr_subgraph_settings)
+```
