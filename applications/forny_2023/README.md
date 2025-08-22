@@ -17,24 +17,16 @@ uv pip install scikit-learn
 uv pip install mofapy2
 # ipynb support
 uv pip install ipykernel
-python -m ipykernel install --user --name=forny-2023
+python -m ipykernel install --name=forny-2023
 ```
 
 ## Analyses
 
 ### 1 - `forny.ipynb` - Summarizes molecular changes with disease
 
-
-
 ### 2 - `napistu_forny.ipynb` - Find molecular subnetworks enriched in disease
 
-
-
 ### 3 - `network_vis.qmd` - Visualizes disease subgraphs
-
-
-
-
 
 ```bash
 quarto render network_vis.qmd --verbose
