@@ -175,11 +175,11 @@ def load_gene_annotations(annotations_path) -> pd.DataFrame:
     return (
         pd.read_csv(annotations_path, index_col = 0)
         .rename(columns = {
-            "soma_joinid" : RESULTS_DEFS.GENE_INDEX,
             "feature_id" : ONTOLOGIES.ENSEMBL_GENE,
             "feature_name" : ONTOLOGIES.SYMBOL
         })
-        .drop(columns = "feature_length")
+        .assign(**{RESULTS_DEFS.VOCAB_NAME : lambda x: x[ONTOLOGIES.SYMBOL]})
+        .drop(columns = ["feature_length", "soma_joinid"])
     )
 
 def extract_model_weights(model, vocab, model_metadata):

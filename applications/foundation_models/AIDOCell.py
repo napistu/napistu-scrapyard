@@ -1,16 +1,47 @@
+""" Utilities for ETLing the AIDOCell foundation model. """
+
 import json
+import logging
 import numpy as np
+import os
 import pandas as pd
 import torch
-import os
+from types import SimpleNamespace
 
 import modelgenerator.cell.utils as cell_utils
 
-def load_model(model_class):
-    """Load and return model in eval mode
+# local .py file
+from utils import (
+    ONTOLOGIES,
+    RESULTS_DEFS,
+)
+
+logger = logging.getLogger(__name__)
+
+AIDOCELL_DEFS = SimpleNamespace(
+    MODEL_NAME = "AIDOCell",
+    # files
+    GENE_FILE = "gene_lists/OS_scRNA_gene_index.19264.tsv",
+    # parameters
+    EMBED_DIM = "embed_dim",
+    N_LAYERS = "n_layers",
+    N_HEADS = "n_heads",
+    HIDDEN_DIM = "hidden_dim",
+)
+
+def load_aidocell_model(model_class):
+    """
+    Load AIDOCell model in eval mode
     
-    Args:
-        model_class: Model class to load
+    Parameters
+    ----------
+    model_class : class
+        AIDOCell model class to load
+        
+    Returns
+    -------
+    model
+        The AIDOCell model in eval mode
     """
     
     model = model_class(
@@ -22,132 +53,163 @@ def load_model(model_class):
     return model
 
 
-def create_gene_mapping_table():
-    """Create a comprehensive gene mapping table with Ensembl IDs"""
+def load_gene_annotations():
+    """
+    Load gene annotations from AIDOCell model
+
+    This is a flat file which is bundled with the package
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with gene annotations
+    """
     
     load_base = os.path.dirname(os.path.abspath(cell_utils.__file__))
-    gene_file = os.path.join(load_base, 'gene_lists/OS_scRNA_gene_index.19264.tsv')
+    gene_file = os.path.join(load_base, AIDOCELL_DEFS.GENE_FILE)
     
     # Load gene symbols
     gene_symbols = pd.read_csv(gene_file, sep='\t')['gene_name'].values
     
-    # Build the mapping from symbols to Ensembl IDs (this is what the function does)
+    # Build the mapping from symbols to Ensembl IDs
     gene_map = cell_utils.build_map(gene_symbols)
     
     # Create the mapping table
     gene_table = pd.DataFrame({
-        'gene_index': np.arange(len(gene_symbols)),
-        'gene_symbol': gene_symbols,
-        'ensembl_id': [gene_map.get(x, f'{x}_unknown_ensg') for x in gene_symbols]
+        RESULTS_DEFS.VOCAB_NAME: gene_symbols,
+        ONTOLOGIES.SYMBOL: gene_symbols,
+        ONTOLOGIES.ENSEMBL_GENE: [gene_map.get(x, f'{x}_unknown_ensg') for x in gene_symbols]
     })
-    
-    # Flag unmapped genes
-    gene_table['is_mapped'] = ~gene_table['ensembl_id'].str.endswith('_unknown_ensg')
     
     return gene_table
 
 
-def extract_attention_weights(model, n_layers):
+def _extract_attention_weights(model):
     """
     Extract core attention weights (Q, K, V, O) from all layers
     
-    Returns:
-        dict: {layer_0: {W_q, W_k, W_v, W_o}, layer_1: {...}, ...}
+    Parameters
+    ----------
+    model : AIDOCell model
+        The AIDOCell model
+        
+    Returns
+    -------
+    dict
+        Dictionary with attention weights by layer
     """
     attention_weights = {}
     encoder = model.encoder
     transformer_layers = encoder.encoder.layer
+    n_layers = model.get_num_layer()
     
     for layer_idx in range(n_layers):
         layer = transformer_layers[layer_idx]
         attention_self = layer.attention.self
         attention_output = layer.attention.output
         
-        attention_weights[f'layer_{layer_idx}'] = {
-            'W_q': attention_self.query.weight.detach().cpu().numpy(),
-            'W_k': attention_self.key.weight.detach().cpu().numpy(),
-            'W_v': attention_self.value.weight.detach().cpu().numpy(),
-            'W_o': attention_output.dense.weight.detach().cpu().numpy(),
+        attention_weights[RESULTS_DEFS.LAYER_NAME_TEMPLATE.format(layer_idx=layer_idx)] = {
+            RESULTS_DEFS.W_Q: attention_self.query.weight.detach().cpu().numpy(),
+            RESULTS_DEFS.W_K: attention_self.key.weight.detach().cpu().numpy(),
+            RESULTS_DEFS.W_V: attention_self.value.weight.detach().cpu().numpy(),
+            RESULTS_DEFS.W_O: attention_output.dense.weight.detach().cpu().numpy(),
         }
     
     return attention_weights
 
 
-def extract_gene_embeddings(model, n_genes):
+def extract_model_weights(model):
     """
-    Extract position embeddings for genes
+    Extract model weights in the standardized format
     
-    Returns:
-        np.ndarray: (n_genes, embed_dim)
+    Parameters
+    ----------
+    model : AIDOCell model
+        The AIDOCell model
+        
+    Returns
+    -------
+    dict
+        Dictionary containing gene_embedding and attention_weights
     """
+    
+    # Extract gene embeddings
     encoder = model.encoder
+    n_genes = len(load_gene_annotations())
     
     with torch.no_grad():
         gene_positions = torch.arange(n_genes)
-        embeddings = encoder.position_embedding(gene_positions).cpu().numpy()
+        gene_embedding = encoder.position_embedding(gene_positions).cpu().numpy()
     
-    return embeddings
+    # Extract attention weights
+    attention_weights = _extract_attention_weights(model)
+    
+    return {
+        RESULTS_DEFS.GENE_EMBEDDING: gene_embedding,
+        RESULTS_DEFS.ATTENTION_WEIGHTS: attention_weights
+    }
 
 
-def extract_model_metadata(model, model_name, n_genes):
+def _format_model_metadata(model):
     """
     Extract model architecture metadata
     
-    Returns:
-        dict: Model configuration information
+    Parameters
+    ----------
+    model : AIDOCell model
+        The AIDOCell model
+        
+    Returns
+    -------
+    dict
+        Dictionary with model metadata
     """
     encoder = model.encoder
+    gene_annotations = load_gene_annotations()
+    n_genes = len(gene_annotations)
+    
+    # Get vocabulary as list of gene symbols (AIDOCell doesn't have special tokens)
+    vocab_list = gene_annotations[RESULTS_DEFS.VOCAB_NAME].tolist()
     
     return {
-        'model_name': model_name,
-        'n_genes': int(n_genes),
-        'embed_dim': int(model.get_embedding_size()),
-        'n_layers': int(model.get_num_layer()),
-        'n_heads': int(encoder.config.num_attention_heads),
-        'hidden_dim': int(encoder.config.hidden_size),
+        RESULTS_DEFS.MODEL_NAME: AIDOCELL_DEFS.MODEL_NAME,
+        RESULTS_DEFS.N_GENES: n_genes,
+        RESULTS_DEFS.N_VOCAB: n_genes,  # Same as n_genes for AIDOCell (no special tokens)
+        RESULTS_DEFS.ORDERED_VOCABULARY: vocab_list,
+        RESULTS_DEFS.EMBED_DIM: int(model.get_embedding_size()),
+        RESULTS_DEFS.N_LAYERS: int(model.get_num_layer()),
+        RESULTS_DEFS.N_HEADS: int(encoder.config.num_attention_heads),
+        # Additional AIDOCell-specific metadata
+        AIDOCELL_DEFS.HIDDEN_DIM: int(encoder.config.hidden_size),
     }
 
 
-def format_weights_for_saving(embeddings, attention_weights):
+def load_aidocell(model_class):
     """
-    Flatten nested attention weights dict for npz format
+    Load the AIDOCell model and return model, gene annotations, and metadata
     
-    Args:
-        embeddings: np.ndarray of gene embeddings
-        attention_weights: dict of {layer_X: {W_q, W_k, W_v, W_o}}
-    
-    Returns:
-        dict: Flattened dictionary ready for np.savez
+    Parameters
+    ----------
+    model_class : class
+        AIDOCell model class to load
+        
+    Returns
+    -------
+    model : AIDOCell model
+        The AIDOCell model
+    gene_annotations : pandas.DataFrame
+        DataFrame with gene annotations
+    model_metadata : dict
+        Dictionary with model metadata
     """
-    weights_dict = {'embeddings': embeddings}
     
-    # Flatten attention weights: layer_0_W_q, layer_0_W_k, etc.
-    for layer_name, layer_weights in attention_weights.items():
-        for weight_name, weight_array in layer_weights.items():
-            weights_dict[f'{layer_name}_{weight_name}'] = weight_array
+    logger.info("Loading AIDOCell model")
+    model = load_aidocell_model(model_class)
     
-    return weights_dict
-
-
-def format_metadata_for_saving(model_metadata, gene_table, files):
-    """
-    Create complete metadata dict for JSON
+    logger.info("Loading gene annotations")
+    gene_annotations = load_gene_annotations()
     
-    Args:
-        model_metadata: dict from extract_model_metadata()
-        gene_table: pd.DataFrame with gene information
-        files: dict with filenames
+    logger.info("Formatting model metadata")
+    model_metadata = _format_model_metadata(model)
     
-    Returns:
-        dict: Complete metadata ready for JSON
-    """
-    return {
-        'model_info': model_metadata,
-        'gene_table': {
-            'gene_index': gene_table['gene_index'].tolist(),
-            'gene_symbol': gene_table['gene_symbol'].tolist(),
-            'ensembl_id': gene_table['ensembl_id'].tolist(),
-            'is_mapped': gene_table['is_mapped'].tolist(),
-        },
-        'files': files,
-    }
+    return model, gene_annotations, model_metadata

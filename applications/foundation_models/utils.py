@@ -32,7 +32,7 @@ RESULTS_DEFS = SimpleNamespace(
     W_O = "W_o",
     # gene metadata
     GENE_ANNOTATIONS = "gene_annotations",
-    GENE_INDEX = "gene_index",
+    VOCAB_NAME = "vocab_name",
     # model metadata
     MODEL_METADATA = "model_metadata",
     MODEL_NAME = "model_name",
@@ -305,17 +305,22 @@ class GeneAnnotations(BaseModel):
             raise ValueError("annotations must be a pandas DataFrame")
         
         # Check required columns
-        required_columns = [RESULTS_DEFS.GENE_INDEX, ONTOLOGIES.ENSEMBL_GENE]
+        required_columns = [RESULTS_DEFS.VOCAB_NAME, ONTOLOGIES.ENSEMBL_GENE]
         for col in required_columns:
             if col not in v.columns:
                 raise ValueError(f"DataFrame missing required column: {col}")
         
-        # Validate gene_index column
-        if not pd.api.types.is_integer_dtype(v[RESULTS_DEFS.GENE_INDEX]):
-            raise ValueError(f"Column {RESULTS_DEFS.GENE_INDEX} must contain integers")
+        # Validate vocab_name column
+        if not pd.api.types.is_string_dtype(v[RESULTS_DEFS.VOCAB_NAME]):
+            raise ValueError(f"Column {RESULTS_DEFS.VOCAB_NAME} must contain strings")
         
-        if (v[RESULTS_DEFS.GENE_INDEX] < 0).any():
-            raise ValueError(f"Column {RESULTS_DEFS.GENE_INDEX} must contain non-negative values")
+        # Check for unique vocab_name values
+        if v[RESULTS_DEFS.VOCAB_NAME].duplicated().any():
+            raise ValueError(f"Column {RESULTS_DEFS.VOCAB_NAME} must contain unique values")
+        
+        # Check for missing vocab_name values
+        if v[RESULTS_DEFS.VOCAB_NAME].isna().any():
+            raise ValueError(f"Column {RESULTS_DEFS.VOCAB_NAME} must not contain missing values")
         
         # Validate ensembl_gene column
         if not pd.api.types.is_string_dtype(v[ONTOLOGIES.ENSEMBL_GENE]):
