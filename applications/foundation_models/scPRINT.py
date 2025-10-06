@@ -88,7 +88,7 @@ def populate_lamin_db():
         logger.info("Lamin database already configured")
 
 
-def extract_gene_embeddings(model, n_genes):
+def extract_gene_embeddings(model):
     """Extract gene embeddings"""
     embeddings = model.gene_encoder.embeddings.weight.detach().cpu().numpy()
     return embeddings

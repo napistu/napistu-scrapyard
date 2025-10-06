@@ -5,25 +5,21 @@ from types import SimpleNamespace
 
 import json
 import os
-from pathlib import Path
-import sys
 import warnings
 
-import torch
 import numpy as np
-
-from torchtext.vocab import Vocab
-from torchtext._torchtext import (
-    Vocab as VocabPybind,
-)
-
-sys.path.insert(0, "../")
-from scgpt.tasks import GeneEmbedding
+import pandas as pd
+import torch
 from scgpt.tokenizer.gene_tokenizer import GeneVocab
 from scgpt.model import TransformerModel
 from scgpt.utils import set_seed
+from torchtext.vocab import Vocab
 
-from utils import RESULTS_DEFS
+# local .py file
+from utils import (
+    ONTOLOGIES,
+    RESULTS_DEFS
+)
 
 os.environ["KMP_WARNINGS"] = "off"
 warnings.filterwarnings('ignore')
@@ -38,6 +34,7 @@ PAD_VALUE = -2
 N_INPUT_BINS = N_BINS
 
 SCGPT_DEFS = SimpleNamespace(
+    MODEL_NAME = "scGPT",
     # urls
     GENE_IDENTIFIERS_URL = "https://github.com/bowang-lab/scGPT/files/13243634/gene_info.csv",
     # files
@@ -51,8 +48,6 @@ SCGPT_DEFS = SimpleNamespace(
     NLAYERS = "nlayers",
     N_LAYERS_CLS = "n_layers_cls",
 )
-
-
 
 def load_scgpt(model_dir: str) -> Tuple[TransformerModel, Vocab, dict]:
 
@@ -118,20 +113,15 @@ def load_scgpt_model(model_file, vocab, model_configs) -> TransformerModel:
         The scGPT model
     """
 
-    EMBSIZE = model_configs[SCGPT_DEFS.EMBSIZE]
-    NHEAD = model_configs[SCGPT_DEFS.NHEAD]
-    D_HID = model_configs[SCGPT_DEFS.D_HID]
-    NLAYERS = model_configs[SCGPT_DEFS.NLAYERS]
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ntokens = len(vocab)  # size of vocabulary
     model = TransformerModel(
         ntokens,
-        EMBSIZE,
-        NHEAD,
-        D_HID,
-        NLAYERS,
+        model_configs[SCGPT_DEFS.EMBSIZE],
+        model_configs[SCGPT_DEFS.NHEAD],
+        model_configs[SCGPT_DEFS.D_HID],
+        model_configs[SCGPT_DEFS.NLAYERS],
         vocab=vocab,
         pad_value=PAD_VALUE,
         n_input_bins=N_INPUT_BINS,
@@ -160,15 +150,54 @@ def load_scgpt_model(model_file, vocab, model_configs) -> TransformerModel:
 
 def format_model_metadata(model_configs, vocab):
 
+    """Summarize the model architecture and other metadata"""
+
+    # Get vocabulary as list of tokens in order
+    vocab_list = vocab.get_itos()
+    
+    # Count actual genes (excluding special tokens)
+    n_genes = len([token for token in vocab_list if not token.startswith('<') and token != PAD_TOKEN])
+    
     return {
-        RESULTS_DEFS.N_GENES: len(vocab),
+        RESULTS_DEFS.MODEL_NAME: SCGPT_DEFS.MODEL_NAME,
+        RESULTS_DEFS.N_GENES: n_genes,
+        RESULTS_DEFS.N_VOCAB: len(vocab),
+        RESULTS_DEFS.ORDERED_VOCABULARY: vocab_list,  # Vocabulary in order
         RESULTS_DEFS.EMBED_DIM: model_configs[SCGPT_DEFS.D_HID],
         RESULTS_DEFS.N_LAYERS: model_configs[SCGPT_DEFS.NLAYERS],
         RESULTS_DEFS.N_HEADS: model_configs[SCGPT_DEFS.NHEAD]
     }
 
-def extract_model_weights(model, vocab, output_path):
-    """Extract just the weights needed to compute attention"""
+def load_gene_annotations(annotations_path) -> pd.DataFrame:
+
+    """Load gene annotations"""
+
+    return (
+        pd.read_csv(annotations_path, index_col = 0)
+        .rename(columns = {
+            "soma_joinid" : RESULTS_DEFS.GENE_INDEX,
+            "feature_id" : ONTOLOGIES.ENSEMBL_GENE,
+            "feature_name" : ONTOLOGIES.SYMBOL
+        })
+        .drop(columns = "feature_length")
+    )
+
+def extract_model_weights(model, vocab, model_metadata):
+    """
+    Extract just the weights needed to compute attention
+    
+    Parameters
+    ----------
+    model : TransformerModel
+        The scGPT model
+    vocab : Vocab
+        The scGPT vocabulary
+    
+    Returns
+    -------
+    dict
+        A dictionary containing the gene embeddings and attention weights
+    """
     
     # Gene embeddings
     gene_ids = torch.arange(len(vocab))
@@ -181,25 +210,18 @@ def extract_model_weights(model, vocab, output_path):
         in_proj = layer.self_attn.in_proj_weight
         out_proj = layer.self_attn.out_proj.weight
         
-        d = 512
-        attention_weights[f'layer_{layer_idx}'] = {
-            'W_q': in_proj[:d, :].cpu().detach().numpy(),
-            'W_k': in_proj[d:2*d, :].cpu().detach().numpy(),
-            'W_v': in_proj[2*d:, :].cpu().detach().numpy(),
-            'W_o': out_proj.cpu().detach().numpy()
+        d = model_metadata[RESULTS_DEFS.EMBED_DIM]
+        if in_proj.shape[0] != 3*d:
+            raise ValueError(f"Expected in_proj.shape[0] to be 3*d, but got {in_proj.shape[0]}")
+
+        attention_weights[RESULTS_DEFS.LAYER_NAME_TEMPLATE.format(layer_idx=layer_idx)] = {
+            RESULTS_DEFS.W_Q: in_proj[:d, :].cpu().detach().numpy(),
+            RESULTS_DEFS.W_K: in_proj[d:2*d, :].cpu().detach().numpy(),
+            RESULTS_DEFS.W_V: in_proj[2*d:, :].cpu().detach().numpy(),
+            RESULTS_DEFS.W_O: out_proj.cpu().detach().numpy()
         }
     
-    # Save everything
-    data = {
-        'model_name': 'scGPT',
-        'genes': vocab.get_itos(),
-        'embeddings': embeddings,
-        'attention_weights': attention_weights,
-        'metadata': {
-            'n_genes': len(vocab),
-            'embed_dim': 512,
-            'n_layers': 12
-        }
+    return {
+        RESULTS_DEFS.GENE_EMBEDDING : embeddings,
+        RESULTS_DEFS.ATTENTION_WEIGHTS : attention_weights,
     }
-    
-    np.savez_compressed(output_path, **data)
