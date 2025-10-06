@@ -27,3 +27,36 @@ mamba install pytorch torchtext==0.18.0 -c pytorch -c conda-forge
 pip install scgpt wandb gseapy ipykernel napistu
 python -m ipykernel install --user --name=scGPT
 ```
+
+## AIDO.Cell
+
+https://github.com/genbio-ai/ModelGenerator is a package for downloading and working with the AIDO models
+
+```bash
+uv venv .aido
+source .aido/bin/activate
+
+uv pip install modelgenerator
+uv pip install ipykernel
+
+python -m ipykernel install --user --name=AIDO.Cell
+```
+
+## scPRINT
+
+https://virtualcellmodels.cziscience.com/model/scprint
+https://github.com/cantinilab/scPRINT
+
+```bash
+uv venv .scprint --python 3.10
+source .scprint/bin/activate
+#one of
+uv pip install scprint 
+
+uv pip install ipykernel
+python -m ipykernel install --user --name=scPRINT
+
+lamin init --storage data/lamin_db --name scPRINT_lamin --modules bionty
+```
+
+

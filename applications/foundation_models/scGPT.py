@@ -177,13 +177,16 @@ def extract_model_weights(model, vocab, output_path):
     # Attention weights for all layers
     attention_weights = {}
     for layer_idx in range(12):
-        in_proj = model.transformer_encoder.layers[layer_idx].self_attn.in_proj_weight
+        layer = model.transformer_encoder.layers[layer_idx]
+        in_proj = layer.self_attn.in_proj_weight
+        out_proj = layer.self_attn.out_proj.weight
         
         d = 512
         attention_weights[f'layer_{layer_idx}'] = {
             'W_q': in_proj[:d, :].cpu().detach().numpy(),
             'W_k': in_proj[d:2*d, :].cpu().detach().numpy(),
-            'W_v': in_proj[2*d:, :].cpu().detach().numpy()
+            'W_v': in_proj[2*d:, :].cpu().detach().numpy(),
+            'W_o': out_proj.cpu().detach().numpy()
         }
     
     # Save everything

@@ -12,6 +12,12 @@ RESULTS_DEFS = SimpleNamespace(
     N_HEADS = "n_heads",
 )
 
+# this matches the Napistu namespace but i don't want to actually add a dependency since Napistu requires Python 3.11+
+# and some model still use 3.10
+ONTOLOGIES = SimpleNamespace(
+    ENSEMBL_GENE = "ensembl_gene",
+)
+
 def load_model_weights(path):
     data = np.load(path, allow_pickle=True)
     return {
