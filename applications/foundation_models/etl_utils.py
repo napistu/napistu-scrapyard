@@ -21,8 +21,22 @@ ONTOLOGIES = SimpleNamespace(
     SYMBOL = "symbol",
 )
 
+MODELS = SimpleNamespace(
+    AIDOCELL = "AIDOCell",
+    SCPRINT = "scPRINT",
+    SCGPT = "scGPT",
+)
+
+AIDOCELL_CLASSES = SimpleNamespace(
+    THREE_M = "aido_cell_3m",
+    TEN_M = "aido_cell_10m",
+    ONE_HUNDRED_M = "aido_cell_100m",
+)
+AIDOCELL_CLASSES_LIST = list(AIDOCELL_CLASSES.__dict__.values())
+
 RESULTS_DEFS = SimpleNamespace(
     # model summaries
+    WEIGHTS_DICT = "weights_dict",
     GENE_EMBEDDING = "gene_embedding",
     LAYER_NAME_TEMPLATE = "layer_{layer_idx}",
     ATTENTION_WEIGHTS = "attention_weights",
@@ -44,59 +58,53 @@ RESULTS_DEFS = SimpleNamespace(
     N_HEADS = "n_heads",
 )
 
-def save_results(weights_dict, gene_annotations, model_metadata, output_dir, output_prefix):
+
+def compute_attention_from_weights(embeddings, W_q, W_k):
     """
-    Save foundation model results to files.
+    Compute attention scores from embeddings and weight matrices.
     
     Parameters
     ----------
-    weights_dict : dict
-        Dictionary containing gene_embedding and attention_weights numpy arrays
-    gene_annotations : pandas.DataFrame
-        DataFrame with gene annotations containing gene_index and ensembl_gene columns
-    model_metadata : dict
-        Dictionary with model metadata (model_name, n_genes, embed_dim, n_layers, n_heads)
-    output_dir : str
-        Directory path to save files
-    output_prefix : str
-        Prefix for output filenames (will create {prefix}_weights.npz and {prefix}_metadata.json)
+    embeddings : numpy.ndarray
+        Gene embeddings matrix of shape (n_genes, embed_dim)
+    W_q : numpy.ndarray
+        Query weight matrix of shape (embed_dim, d_k)
+    W_k : numpy.ndarray
+        Key weight matrix of shape (embed_dim, d_k)
+        
+    Returns
+    -------
+    numpy.ndarray
+        Attention scores matrix of shape (n_genes, n_genes) with softmax applied
         
     Notes
     -----
-    This function validates all input data using Pydantic validators before saving.
-    Creates output directory if it doesn't exist.
+    Computes scaled dot-product attention: Attention(Q,K) = softmax(QK^T / sqrt(d_k))
+    where Q = embeddings @ W_q.T and K = embeddings @ W_k.T
     """
-    weights_filename, metadata_filename = _prefix_to_savefiles(output_prefix)
-    weights_path = os.path.join(output_dir, weights_filename)
-    metadata_path = os.path.join(output_dir, metadata_filename)
+    Q = embeddings @ W_q.T
+    K = embeddings @ W_k.T
+    attn_scores = (Q @ K.T) / np.sqrt(Q.shape[-1])
+    return softmax(attn_scores, axis=-1)
 
-    logger.info(f"Saving weights to {weights_path} and metadata to {metadata_path}")
-    
-    # validating data structure
-    FoundationModelData(**weights_dict)
-    ModelMetadata(**model_metadata)
-    GeneAnnotations(annotations=gene_annotations)
 
-    logger.info("Successfully validated weights, gene metadata and model metadata")
+def create_adocell_prefix(model_class_name: str) -> str:
+    """
+    Create a prefix for AIDOCell model results.
     
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save weights data to npz
-    logger.info(f"Saving weights to {weights_path}")
-    np.savez(weights_path, **weights_dict)
-    
-    # Combine gene_annotations and model_metadata into single JSON
-    logger.info(f"Saving metadata to {metadata_path}")
-    combined_metadata = {
-        RESULTS_DEFS.MODEL_METADATA: model_metadata,
-        RESULTS_DEFS.GENE_ANNOTATIONS: gene_annotations.to_dict('records')  # Convert DataFrame to list of dicts
-    }
-    
-    with open(metadata_path, 'w') as f:
-        json.dump(combined_metadata, f, indent=2)
-    
-    logger.info("Successfully saved all results")
+    This can be used to load a specific AIDOCell model class' summaries from the results directory.
+
+    Parameters
+    ----------
+    model_class_name : str
+        Name of the AIDOCell model class
+        
+    Returns
+    -------
+    str
+        Prefix for AIDOCell model results
+    """
+    return f"{MODELS.AIDOCELL}_{model_class_name}"
 
 
 def load_results(output_dir, output_prefix) -> Tuple[dict, pd.DataFrame, dict]:
@@ -160,34 +168,61 @@ def load_results(output_dir, output_prefix) -> Tuple[dict, pd.DataFrame, dict]:
     return weights_dict, gene_annotations, model_metadata
 
 
-def compute_attention_from_weights(embeddings, W_q, W_k):
+def save_results(weights_dict, gene_annotations, model_metadata, output_dir, output_prefix):
     """
-    Compute attention scores from embeddings and weight matrices.
+    Save foundation model results to files.
     
     Parameters
     ----------
-    embeddings : numpy.ndarray
-        Gene embeddings matrix of shape (n_genes, embed_dim)
-    W_q : numpy.ndarray
-        Query weight matrix of shape (embed_dim, d_k)
-    W_k : numpy.ndarray
-        Key weight matrix of shape (embed_dim, d_k)
-        
-    Returns
-    -------
-    numpy.ndarray
-        Attention scores matrix of shape (n_genes, n_genes) with softmax applied
+    weights_dict : dict
+        Dictionary containing gene_embedding and attention_weights numpy arrays
+    gene_annotations : pandas.DataFrame
+        DataFrame with gene annotations containing gene_index and ensembl_gene columns
+    model_metadata : dict
+        Dictionary with model metadata (model_name, n_genes, embed_dim, n_layers, n_heads)
+    output_dir : str
+        Directory path to save files
+    output_prefix : str
+        Prefix for output filenames (will create {prefix}_weights.npz and {prefix}_metadata.json)
         
     Notes
     -----
-    Computes scaled dot-product attention: Attention(Q,K) = softmax(QK^T / sqrt(d_k))
-    where Q = embeddings @ W_q.T and K = embeddings @ W_k.T
+    This function validates all input data using Pydantic validators before saving.
+    Creates output directory if it doesn't exist.
     """
-    Q = embeddings @ W_q.T
-    K = embeddings @ W_k.T
-    attn_scores = (Q @ K.T) / np.sqrt(Q.shape[-1])
-    return softmax(attn_scores, axis=-1)
+    weights_filename, metadata_filename = _prefix_to_savefiles(output_prefix)
+    weights_path = os.path.join(output_dir, weights_filename)
+    metadata_path = os.path.join(output_dir, metadata_filename)
 
+    logger.info(f"Saving weights to {weights_path} and metadata to {metadata_path}")
+    
+    # validating data structure
+    FoundationModelData(**weights_dict)
+    ModelMetadata(**model_metadata)
+    GeneAnnotations(annotations=gene_annotations)
+
+    logger.info("Successfully validated weights, gene metadata and model metadata")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Save weights data to npz
+    logger.info(f"Saving weights to {weights_path}")
+    np.savez(weights_path, **weights_dict)
+    
+    # Combine gene_annotations and model_metadata into single JSON
+    logger.info(f"Saving metadata to {metadata_path}")
+    combined_metadata = {
+        RESULTS_DEFS.MODEL_METADATA: model_metadata,
+        RESULTS_DEFS.GENE_ANNOTATIONS: gene_annotations.to_dict('records')  # Convert DataFrame to list of dicts
+    }
+    
+    with open(metadata_path, 'w') as f:
+        json.dump(combined_metadata, f, indent=2)
+    
+    logger.info("Successfully saved all results")
+
+# validators
 
 class FoundationModelData(BaseModel):
     """Simple validator for foundation model data dictionary structure."""
@@ -327,6 +362,8 @@ class GeneAnnotations(BaseModel):
             raise ValueError(f"Column {ONTOLOGIES.ENSEMBL_GENE} must contain strings")
         
         return v
+
+# private utils
 
 def _prefix_to_savefiles(prefix: str) -> Tuple[str, str]:
     """

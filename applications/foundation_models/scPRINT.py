@@ -12,7 +12,8 @@ from scdataloader.utils import populate_my_ontology
 from scprint import scPrint
 
 # local .py file
-from utils import (
+from etl_utils import (
+    MODELS,
     ONTOLOGIES,
     RESULTS_DEFS,
 )
@@ -20,7 +21,7 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 SCPRINT_DEFS = SimpleNamespace(
-    MODEL_NAME = "scPRINT",
+    MODEL_NAME = MODELS.SCPRINT,
     # files
     CHECKPOINT_FILENAME = "v2-medium.ckpt",
     # parameters

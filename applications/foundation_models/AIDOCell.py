@@ -12,6 +12,9 @@ import modelgenerator.cell.utils as cell_utils
 
 # local .py file
 from utils import (
+    create_adocell_prefix,
+    save_results,
+    MODELS,
     ONTOLOGIES,
     RESULTS_DEFS,
 )
@@ -19,7 +22,7 @@ from utils import (
 logger = logging.getLogger(__name__)
 
 AIDOCELL_DEFS = SimpleNamespace(
-    MODEL_NAME = "AIDOCell",
+    MODEL_NAME = MODELS.AIDOCELL,
     # files
     GENE_FILE = "gene_lists/OS_scRNA_gene_index.19264.tsv",
     # parameters
@@ -28,6 +31,48 @@ AIDOCELL_DEFS = SimpleNamespace(
     N_HEADS = "n_heads",
     HIDDEN_DIM = "hidden_dim",
 )
+
+
+def process_model(model_class, output_dir) -> None:
+
+    """
+    Process a given model class and save the results to the output directory.
+
+    Parameters
+    ----------
+    model_class : class
+        AIDOCell model class to load
+    output_dir : str
+        Output directory to save the results
+        
+    Returns
+    -------
+    None
+    """
+
+    model_class_name = model_class.__name__
+    file_prefix = create_adocell_prefix(model_class_name)
+    
+    logger.info(f"Extracting: {model_class_name}")
+    
+    # 1. Load model and data
+    logger.info("\n1. Loading model and data...")
+    model, gene_annotations, model_metadata = load_aidocell(model_class)
+    logger.info(f"   {len(gene_annotations)} genes, {model_metadata['n_layers']} layers")
+
+    # 2. Extract weights
+    logger.info("2. Extracting weights...")
+    weights_dict = extract_model_weights(model)
+    logger.info(f"   Embeddings: {weights_dict['gene_embedding'].shape}")
+    logger.info(f"   Attention weights: {model_metadata['n_layers']} layers × 4 matrices (Q,K,V,O)")
+
+    # 3. Save results
+    logger.info("3. Saving results...")
+    save_results(weights_dict, gene_annotations, model_metadata, output_dir, file_prefix)
+    logger.info("   Successfully saved all results!")
+
+    return None
+
 
 def load_aidocell_model(model_class):
     """

@@ -16,7 +16,8 @@ from scgpt.utils import set_seed
 from torchtext.vocab import Vocab
 
 # local .py file
-from utils import (
+from etl_utils import (
+    MODELS,
     ONTOLOGIES,
     RESULTS_DEFS
 )
@@ -34,7 +35,7 @@ PAD_VALUE = -2
 N_INPUT_BINS = N_BINS
 
 SCGPT_DEFS = SimpleNamespace(
-    MODEL_NAME = "scGPT",
+    MODEL_NAME = MODELS.SCGPT,
     # urls
     GENE_IDENTIFIERS_URL = "https://github.com/bowang-lab/scGPT/files/13243634/gene_info.csv",
     # files
