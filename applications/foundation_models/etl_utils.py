@@ -59,35 +59,6 @@ RESULTS_DEFS = SimpleNamespace(
 )
 
 
-def compute_attention_from_weights(embeddings, W_q, W_k):
-    """
-    Compute attention scores from embeddings and weight matrices.
-    
-    Parameters
-    ----------
-    embeddings : numpy.ndarray
-        Gene embeddings matrix of shape (n_genes, embed_dim)
-    W_q : numpy.ndarray
-        Query weight matrix of shape (embed_dim, d_k)
-    W_k : numpy.ndarray
-        Key weight matrix of shape (embed_dim, d_k)
-        
-    Returns
-    -------
-    numpy.ndarray
-        Attention scores matrix of shape (n_genes, n_genes) with softmax applied
-        
-    Notes
-    -----
-    Computes scaled dot-product attention: Attention(Q,K) = softmax(QK^T / sqrt(d_k))
-    where Q = embeddings @ W_q.T and K = embeddings @ W_k.T
-    """
-    Q = embeddings @ W_q.T
-    K = embeddings @ W_k.T
-    attn_scores = (Q @ K.T) / np.sqrt(Q.shape[-1])
-    return softmax(attn_scores, axis=-1)
-
-
 def create_adocell_prefix(model_class_name: str) -> str:
     """
     Create a prefix for AIDOCell model results.

@@ -3,6 +3,9 @@ Utility functions for analyzing foundation models. Once these stabalize a bit, t
 """
 
 import logging
+import gc
+from typing import Union
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -16,6 +19,60 @@ from etl_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# memory management utilities
+
+@contextmanager
+def memory_manager(device: torch.device = torch.device('cpu')):
+    """
+    Context manager for general memory management.
+    
+    This context manager ensures proper cleanup by:
+    1. Clearing device cache before and after operations
+    2. Forcing garbage collection
+    
+    Parameters
+    ----------
+    device : torch.device
+        The device to manage memory for
+    
+    Usage:
+        with memory_manager(device):
+            # Your operations here
+            pass
+    """
+    # Clear cache before starting
+    if device.type == 'mps' and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    elif device.type == 'cuda' and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    try:
+        yield
+    finally:
+        # Clear cache after operations
+        if device.type == 'mps' and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+        elif device.type == 'cuda' and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Force garbage collection
+        gc.collect()
+
+
+def cleanup_tensors(*tensors) -> None:
+    """
+    Explicitly clean up one or more tensors and free their memory.
+    
+    Parameters
+    ----------
+    *tensors : torch.Tensor
+        One or more tensors to clean up
+    """
+    for tensor in tensors:
+        if tensor is not None:
+            del tensor
+
 
 # data loading
 
@@ -178,7 +235,7 @@ def select_device(mps_valid: bool = True):
 def compute_cosine_distances_torch(embedding: np.ndarray, device: torch.device) -> np.ndarray:
 
     """
-    Compute cosine distance matrix using PyTorch
+    Compute cosine distance matrix using PyTorch with proper memory management
     
     Parameters
     ----------
@@ -192,24 +249,29 @@ def compute_cosine_distances_torch(embedding: np.ndarray, device: torch.device) 
     cosine_dist : np.ndarray
         The cosine distance matrix
     """
-
-    # convert the embedding to a tensor and move it to the device
-    embedding_tensor = torch.tensor(embedding, dtype=torch.float32, device=device)
     
-    # normalize the embeddings
-    embeddings_norm = torch.nn.functional.normalize(embedding_tensor, p=2, dim=1)
-    # compute the cosine similarity matrix
-    cosine_sim = torch.mm(embeddings_norm, embeddings_norm.t())
-    # convert to cosine distance
-    cosine_dist = 1 - cosine_sim
-
-    # move back to the cpu and convert to numpy
-    return cosine_dist.cpu().numpy()
+    with memory_manager(device):
+        # convert the embedding to a tensor and move it to the device
+        embedding_tensor = torch.tensor(embedding, dtype=torch.float32, device=device)
+        
+        # normalize the embeddings
+        embeddings_norm = torch.nn.functional.normalize(embedding_tensor, p=2, dim=1)
+        
+        # compute the cosine similarity matrix
+        cosine_sim = torch.mm(embeddings_norm, embeddings_norm.t())
+        
+        # convert to cosine distance
+        cosine_dist = 1 - cosine_sim
+        
+        # move back to the cpu and convert to numpy
+        result = cosine_dist.cpu().numpy()
+        
+        return result
 
 
 def compute_spearman_correlation_torch(x: np.ndarray, y: np.ndarray, device: torch.device) -> float:
     """
-    Compute Spearman correlation using PyTorch (much faster than scipy)
+    Compute Spearman correlation using PyTorch with proper memory management
     
     Parameters
     ----------
@@ -226,22 +288,89 @@ def compute_spearman_correlation_torch(x: np.ndarray, y: np.ndarray, device: tor
         Spearman correlation coefficient
     """
     
-    # Convert to torch tensors if needed
-    if isinstance(x, np.ndarray):
-        x = torch.from_numpy(x).float().to(device)
-    if isinstance(y, np.ndarray):
-        y = torch.from_numpy(y).float().to(device)
+    with memory_manager(device):
+        # Convert to torch tensors if needed
+        if isinstance(x, np.ndarray):
+            x_tensor = torch.from_numpy(x).float().to(device)
+        else:
+            x_tensor = x.to(device) if hasattr(x, 'to') else x
+            
+        if isinstance(y, np.ndarray):
+            y_tensor = torch.from_numpy(y).float().to(device)
+        else:
+            y_tensor = y.to(device) if hasattr(y, 'to') else y
+        
+        # Convert values to ranks
+        x_rank = torch.argsort(torch.argsort(x_tensor)).float()
+        y_rank = torch.argsort(torch.argsort(y_tensor)).float()
+        
+        # Calculate Pearson correlation on ranks
+        x_centered = x_rank - x_rank.mean()
+        y_centered = y_rank - y_rank.mean()
+        
+        correlation = (x_centered * y_centered).sum() / (
+            torch.sqrt((x_centered ** 2).sum()) * torch.sqrt((y_centered ** 2).sum())
+        )
+        
+        result = correlation.item()
+        
+        return result
+
+
+def compute_attention_from_weights(
+    embeddings: np.ndarray,
+    W_q: np.ndarray,
+    W_k: np.ndarray,
+    device: Union[str, torch.device] = torch.device('cpu')
+) -> torch.Tensor:
+    """
+    Compute attention scores from embeddings and weight matrices with proper memory management.
     
-    # Convert values to ranks
-    x_rank = torch.argsort(torch.argsort(x)).float()
-    y_rank = torch.argsort(torch.argsort(y)).float()
+    Parameters
+    ----------
+    embeddings : numpy.ndarray or torch.Tensor
+        Gene embeddings matrix of shape (n_genes, embed_dim)
+    W_q : numpy.ndarray or torch.Tensor
+        Query weight matrix of shape (embed_dim, d_k)
+    W_k : numpy.ndarray or torch.Tensor
+        Key weight matrix of shape (embed_dim, d_k)
+    device : str or torch.device, optional
+        Device to perform computation on ('cpu', 'cuda', etc.). Default is 'cpu'
+        
+    Returns
+    -------
+    torch.Tensor
+        Attention scores matrix of shape (n_genes, n_genes) with softmax applied
+        
+    Notes
+    -----
+    Computes scaled dot-product attention: Attention(Q,K) = softmax(QK^T / sqrt(d_k))
+    where Q = embeddings @ W_q.T and K = embeddings @ W_k.T
+    """
     
-    # Calculate Pearson correlation on ranks
-    x_centered = x_rank - x_rank.mean()
-    y_centered = y_rank - y_rank.mean()
-    
-    correlation = (x_centered * y_centered).sum() / (
-        torch.sqrt((x_centered ** 2).sum()) * torch.sqrt((y_centered ** 2).sum())
-    )
-    
-    return correlation.item()
+    with memory_manager(device):
+        # Convert to torch tensors if needed and move to device
+        if isinstance(embeddings, np.ndarray):
+            embeddings_tensor = torch.from_numpy(embeddings).float().to(device)
+        else:
+            embeddings_tensor = embeddings.to(device)
+        
+        if isinstance(W_q, np.ndarray):
+            W_q_tensor = torch.from_numpy(W_q).float().to(device)
+        else:
+            W_q_tensor = W_q.to(device)
+        
+        if isinstance(W_k, np.ndarray):
+            W_k_tensor = torch.from_numpy(W_k).float().to(device)
+        else:
+            W_k_tensor = W_k.to(device)
+        
+        # Compute attention
+        Q = embeddings_tensor @ W_q_tensor.T
+        K = embeddings_tensor @ W_k_tensor.T
+        
+        attn_scores = (Q @ K.T) / torch.sqrt(torch.tensor(Q.shape[-1], dtype=torch.float32, device=device))
+        
+        result = torch.softmax(attn_scores, dim=-1)
+        
+        return result

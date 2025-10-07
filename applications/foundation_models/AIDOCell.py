@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import modelgenerator.cell.utils as cell_utils
 
 # local .py file
-from utils import (
+from etl_utils import (
     create_adocell_prefix,
     save_results,
     MODELS,
