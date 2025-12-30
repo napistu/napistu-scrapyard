@@ -308,7 +308,7 @@ class GeneAnnotations(BaseModel):
     @classmethod
     def validate_annotations_structure(cls, v):
         if not isinstance(v, pd.DataFrame):
-            raise ValueError("annotations must be a pandas DataFrame")
+            raise ValueError("annotations mus t be a pandas DataFrame")
         
         # Check required columns
         required_columns = [RESULTS_DEFS.VOCAB_NAME, ONTOLOGIES.ENSEMBL_GENE]
