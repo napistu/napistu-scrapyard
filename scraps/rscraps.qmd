@@ -1,0 +1,27 @@
+
+
+```{r env_setup}
+library(napistu.r)
+
+# configure path to venv & data
+napistu_config = napistu.r::create_napistu_config(
+    python_config = list(virtualenv = "~/Desktop/GITHUB/napistu/lib/napistu-scrapyard/scraps/pytorch/.venv"),
+    assets_config = list(assets_dir = "~/Desktop/GITHUB/napistu/dev/human_consensus_no_rxns")
+)
+
+# load the SBML_dfs and NapistuGraph
+napistu.r::setup_napistu_list(napistu_config)
+
+# bind the Napistu Python package
+napistu <- napistu_list$python_modules$napistu
+```
+
+```{r}
+napistu <- napistu_list$python_modules$napistu
+```
+
+```{r}
+top_component <- napistu$network$ig_utils$filter_to_largest_subgraphs(
+    napistu_list$napistu_graph, top_k = 1L
+)[[1]]
+```
