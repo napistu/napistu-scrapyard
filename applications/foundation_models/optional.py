@@ -3,21 +3,43 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from functools import wraps
 from typing import Any, Callable, TypeVar, cast
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+logger = logging.getLogger(__name__)
 
 
 def import_modelgenerator():
   """Import and return modelgenerator, raising an informative error if missing."""
 
   try:
-    return importlib.import_module("modelgenerator")
+    modelgenerator = importlib.import_module("modelgenerator")
+    # Check version and warn if not 0.1.2
+    try:
+      # Try to get version from __version__ attribute first
+      version = getattr(modelgenerator, "__version__", None)
+      # If not found, use importlib.metadata (Python 3.11+)
+      if version is None:
+        from importlib.metadata import version as get_package_version
+
+        version = get_package_version("modelgenerator")
+
+      if version != "0.1.2":
+        logger.warning(
+          f"Expected modelgenerator==0.1.2, but found version {version}. "
+          "This may cause compatibility issues. Install with `pip install modelgenerator==0.1.2`."
+        )
+    except Exception:
+      # If version check fails, continue anyway
+      pass
+    return modelgenerator
   except ModuleNotFoundError as exc:  # pragma: no cover
     raise ImportError(
       "This functionality requires `modelgenerator`. "
-      "Install with `pip install modelgenerator`."
+      "Install with `pip install modelgenerator==0.1.2`."
     ) from exc
 
 
