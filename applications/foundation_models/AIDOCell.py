@@ -8,8 +8,6 @@ import torch
 from types import SimpleNamespace
 from typing import List
 
-import modelgenerator.cell.utils as cell_utils
-
 # Import from napistu_torch
 from napistu.constants import ONTOLOGIES
 from napistu_torch.load.constants import (
@@ -21,6 +19,12 @@ from napistu_torch.load.foundation_models import (
     FoundationModel,
     FoundationModelWeights,
 )
+
+from etl_utils import (
+    create_and_save_foundation_model,
+    format_base_metadata,
+)
+from optional import require_modelgenerator
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,7 @@ AIDOCELL_DEFS = SimpleNamespace(
 )
 
 
+@require_modelgenerator
 def process_model(model_class, output_dir) -> None:
 
     """
@@ -71,14 +76,9 @@ def process_model(model_class, output_dir) -> None:
     logger.info(f"   Attention weights: {model_metadata[FM_DEFS.N_LAYERS]} layers × 4 matrices (Q,K,V,O)")
 
     # 3. Create FoundationModel and save
-    logger.info("3. Creating FoundationModel and saving...")
-    foundation_model = FoundationModel(
-        weights=weights,
-        gene_annotations=gene_annotations,
-        model_metadata=model_metadata,
+    create_and_save_foundation_model(
+        weights, gene_annotations, model_metadata, output_dir, file_prefix
     )
-    foundation_model.save(output_dir, file_prefix)
-    logger.info("   Successfully saved all results!")
 
     return None
 
@@ -107,6 +107,7 @@ def load_aidocell_model(model_class):
     return model
 
 
+@require_modelgenerator
 def load_gene_annotations():
     """
     Load gene annotations from AIDOCell model
@@ -118,6 +119,7 @@ def load_gene_annotations():
     pd.DataFrame
         DataFrame with gene annotations
     """
+    import modelgenerator.cell.utils as cell_utils
     
     load_base = os.path.dirname(os.path.abspath(cell_utils.__file__))
     gene_file = os.path.join(load_base, AIDOCELL_DEFS.GENE_FILE)
@@ -228,20 +230,21 @@ def _format_model_metadata(model, model_class_name):
     # Get vocabulary as list of gene symbols (AIDOCell doesn't have special tokens)
     vocab_list = gene_annotations[FM_DEFS.VOCAB_NAME].tolist()
     
-    return {
-        FM_DEFS.MODEL_NAME: AIDOCELL_DEFS.MODEL_NAME,
-        FM_DEFS.MODEL_VARIANT: model_class_name,
-        FM_DEFS.N_GENES: n_genes,
-        FM_DEFS.N_VOCAB: n_genes,  # Same as n_genes for AIDOCell (no special tokens)
-        FM_DEFS.ORDERED_VOCABULARY: vocab_list,
-        FM_DEFS.EMBED_DIM: int(model.get_embedding_size()),
-        FM_DEFS.N_LAYERS: int(model.get_num_layer()),
-        FM_DEFS.N_HEADS: int(encoder.config.num_attention_heads),
+    return format_base_metadata(
+        model_name=AIDOCELL_DEFS.MODEL_NAME,
+        n_genes=n_genes,
+        n_vocab=n_genes,  # Same as n_genes for AIDOCell (no special tokens)
+        vocab_list=vocab_list,
+        embed_dim=int(model.get_embedding_size()),
+        n_layers=int(model.get_num_layer()),
+        n_heads=int(encoder.config.num_attention_heads),
+        model_variant=model_class_name,
         # Additional AIDOCell-specific metadata
-        AIDOCELL_DEFS.HIDDEN_DIM: int(encoder.config.hidden_size),
-    }
+        **{AIDOCELL_DEFS.HIDDEN_DIM: int(encoder.config.hidden_size)},
+    )
 
 
+@require_modelgenerator
 def load_aidocell(model_class):
     """
     Load the AIDOCell model and return model, gene annotations, and metadata

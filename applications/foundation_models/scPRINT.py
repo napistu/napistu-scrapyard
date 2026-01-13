@@ -5,13 +5,10 @@ import os
 from types import SimpleNamespace
 from typing import List
 
-import bionty as bt
 import torch
 import numpy as np
 import pandas as pd
 from huggingface_hub import hf_hub_download
-from scdataloader.utils import populate_my_ontology
-from scprint import scPrint
 
 # Import from napistu_torch
 from napistu.constants import ONTOLOGIES
@@ -24,6 +21,13 @@ from napistu_torch.load.foundation_models import (
     FoundationModel,
     FoundationModelWeights,
 )
+
+from etl_utils import (
+    create_and_save_foundation_model,
+    format_base_metadata,
+    split_qkv_weights,
+)
+from optional import require_bionty, require_scdataloader, require_scprint
 
 # Import SCPRINT_VERSIONS from constants
 try:
@@ -56,6 +60,7 @@ SCPRINT_DEFS = SimpleNamespace(
     N_HEADS = 4,  # Fixed architecture parameter
 )
 
+@require_scprint
 def process_model(version_key: str, output_dir: str, model_path: str = None) -> None:
     """
     Process a given scPRINT model version and save the results to the output directory.
@@ -103,17 +108,13 @@ def process_model(version_key: str, output_dir: str, model_path: str = None) -> 
     logger.info(f"   Attention weights: {model_metadata[FM_DEFS.N_LAYERS]} layers × 4 matrices (Q,K,V,O)")
 
     # 3. Create FoundationModel and save
-    logger.info("3. Creating FoundationModel and saving...")
-    foundation_model = FoundationModel(
-        weights=weights,
-        gene_annotations=gene_annotations,
-        model_metadata=model_metadata,
+    create_and_save_foundation_model(
+        weights, gene_annotations, model_metadata, output_dir, file_prefix
     )
-    foundation_model.save(output_dir, file_prefix)
-    logger.info("   Successfully saved all results!")
 
     return None
 
+@require_scprint
 def load_scprint_model(checkpoint_path, transformer="normal"):
 
     """
@@ -131,6 +132,7 @@ def load_scprint_model(checkpoint_path, transformer="normal"):
     scPrint
         The scPRINT model
     """
+    from scprint import scPrint
 
     m = torch.load(checkpoint_path, map_location=torch.device('cpu'))
     
@@ -178,15 +180,19 @@ def load_gene_annotations(model) -> pd.DataFrame:
     
     # Optionally add gene symbols from lamindb
     try:
+        import bionty as bt
         all_genes_df = bt.Gene.filter().df()
         ensembl_to_symbol = all_genes_df.set_index('ensembl_gene_id')['symbol'].to_dict()
         gene_table[ONTOLOGIES.SYMBOL] = gene_table[ONTOLOGIES.ENSEMBL_GENE].map(ensembl_to_symbol)
-    except:
+    except Exception as e:
+        logger.warning(f"Error loading gene symbols from lamin database: {e}")
         gene_table[ONTOLOGIES.SYMBOL] = gene_table[ONTOLOGIES.ENSEMBL_GENE]
     
     return gene_table
 
 
+@require_bionty
+@require_scdataloader
 def populate_lamin_db() -> None:
 
     """
@@ -198,6 +204,8 @@ def populate_lamin_db() -> None:
     -------
     None
     """
+    import bionty as bt
+    from scdataloader.utils import populate_my_ontology
     
     # quick check to see if the lamin database is already configured
     organisms = bt.Organism.filter().df()
@@ -237,6 +245,7 @@ def extract_model_weights(model) -> FoundationModelWeights:
     )
 
 
+@require_scprint
 def load_scprint(checkpoint_path, transformer="normal", version: str = None):
     """
     Load the scPRINT model and return model, gene annotations, and metadata
@@ -285,13 +294,14 @@ def _extract_attention_weights(model) -> List[AttentionLayer]:
         
         # Get combined QKV weight: (3 * d_model, d_model)
         qkv_weight = mixer.Wqkv.weight.detach().cpu().numpy()
+        w_q, w_k, w_v = split_qkv_weights(qkv_weight, d_model)
         
         attention_layers.append(
             AttentionLayer(
                 layer_idx=layer_idx,
-                W_q=qkv_weight[:d_model, :],
-                W_k=qkv_weight[d_model:2*d_model, :],
-                W_v=qkv_weight[2*d_model:, :],
+                W_q=w_q,
+                W_k=w_k,
+                W_v=w_v,
                 W_o=mixer.out_proj.weight.detach().cpu().numpy(),
             )
         )
@@ -320,18 +330,13 @@ def _format_model_metadata(model, version: str = None):
     vocab_list = list(model.genes)
     n_genes = len(vocab_list)
     
-    metadata = {
-        FM_DEFS.MODEL_NAME: SCPRINT_DEFS.MODEL_NAME,
-        FM_DEFS.N_GENES: n_genes,
-        FM_DEFS.N_VOCAB: n_genes,  # Same as n_genes for scPRINT (no special tokens)
-        FM_DEFS.ORDERED_VOCABULARY: vocab_list,
-        FM_DEFS.EMBED_DIM: int(model.d_model),
-        FM_DEFS.N_LAYERS: int(model.nlayers),
-        FM_DEFS.N_HEADS: SCPRINT_DEFS.N_HEADS
-    }
-    
-    # Add version if provided
-    if version is not None:
-        metadata[FM_DEFS.MODEL_VARIANT] = version
-    
-    return metadata
+    return format_base_metadata(
+        model_name=SCPRINT_DEFS.MODEL_NAME,
+        n_genes=n_genes,
+        n_vocab=n_genes,  # Same as n_genes for scPRINT (no special tokens)
+        vocab_list=vocab_list,
+        embed_dim=int(model.d_model),
+        n_layers=int(model.nlayers),
+        n_heads=SCPRINT_DEFS.N_HEADS,
+        model_variant=version,
+    )

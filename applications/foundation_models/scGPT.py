@@ -1,7 +1,7 @@
 """ Utility functions for interacting with the scGPT model. """
 
 import logging
-from typing import Tuple, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 from types import SimpleNamespace
 
 import json
@@ -11,10 +11,10 @@ import warnings
 import numpy as np
 import pandas as pd
 import torch
-from scgpt.tokenizer.gene_tokenizer import GeneVocab
-from scgpt.model import TransformerModel
-from scgpt.utils import set_seed
-from torchtext.vocab import Vocab
+
+if TYPE_CHECKING:
+    from scgpt.model import TransformerModel
+    from torchtext.vocab import Vocab
 
 # Import from napistu_torch
 from napistu.constants import ONTOLOGIES
@@ -29,12 +29,18 @@ from napistu_torch.load.foundation_models import (
     FoundationModelWeights,
 )
 
+from etl_utils import (
+    create_and_save_foundation_model,
+    format_base_metadata,
+    split_qkv_weights,
+)
+from optional import require_scgpt, require_torchtext
+
 logger = logging.getLogger(__name__)
 
 os.environ["KMP_WARNINGS"] = "off"
 warnings.filterwarnings('ignore')
 
-set_seed(42)
 PAD_TOKEN = "<pad>"
 SPECIAL_TOKENS = [PAD_TOKEN, "<cls>", "<eoc>"]
 N_HVG = 1200
@@ -60,6 +66,7 @@ SCGPT_DEFS = SimpleNamespace(
 )
 
 
+@require_scgpt
 def process_scgpt(model_dir: str, output_dir: str, annotations_path: Optional[str] = None) -> None:
     """
     Process the scGPT model and save the results to the output directory.
@@ -109,17 +116,14 @@ def process_scgpt(model_dir: str, output_dir: str, annotations_path: Optional[st
     logger.info(f"   Attention weights: {model_metadata[FM_DEFS.N_LAYERS]} layers × 4 matrices (Q,K,V,O)")
 
     # 4. Create FoundationModel and save
-    logger.info("4. Creating FoundationModel and saving...")
-    foundation_model = FoundationModel(
-        weights=weights,
-        gene_annotations=gene_annotations,
-        model_metadata=model_metadata,
+    create_and_save_foundation_model(
+        weights, gene_annotations, model_metadata, output_dir, file_prefix
     )
-    foundation_model.save(output_dir, file_prefix)
-    logger.info("   Successfully saved all results!")
 
     return None
 
+@require_scgpt
+@require_torchtext
 def load_scgpt(model_dir: str) -> Tuple[TransformerModel, Vocab, dict, str]:
     """
     Load the scGPT model from a directory containing model files.
@@ -140,6 +144,7 @@ def load_scgpt(model_dir: str) -> Tuple[TransformerModel, Vocab, dict, str]:
     checkpoint_path : str
         Path to the checkpoint file (best_model.pt), useful for direct weight extraction
     """
+    from scgpt.tokenizer.gene_tokenizer import GeneVocab
 
     model_config_file = os.path.join(model_dir, SCGPT_DEFS.CONFIG_FILENAME)
     model_file = os.path.join(model_dir, SCGPT_DEFS.MODEL_FILENAME)
@@ -165,8 +170,9 @@ def load_scgpt(model_dir: str) -> Tuple[TransformerModel, Vocab, dict, str]:
     return model, vocab, model_metadata, model_file
     
 
-def load_scgpt_model(model_file, vocab, model_configs) -> TransformerModel:
-
+@require_scgpt
+@require_torchtext
+def load_scgpt_model(model_file: str, vocab: Vocab, model_configs: dict) -> TransformerModel:
     """
     Load and return the scGPT model
 
@@ -184,6 +190,7 @@ def load_scgpt_model(model_file, vocab, model_configs) -> TransformerModel:
     model : TransformerModel
         The scGPT model
     """
+    from scgpt.model import TransformerModel
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -230,15 +237,15 @@ def format_model_metadata(model_configs, vocab):
     # Count actual genes (excluding special tokens)
     n_genes = len([token for token in vocab_list if not token.startswith('<') and token != PAD_TOKEN])
     
-    return {
-        FM_DEFS.MODEL_NAME: SCGPT_DEFS.MODEL_NAME,
-        FM_DEFS.N_GENES: n_genes,
-        FM_DEFS.N_VOCAB: len(vocab),
-        FM_DEFS.ORDERED_VOCABULARY: vocab_list,  # Vocabulary in order
-        FM_DEFS.EMBED_DIM: model_configs[SCGPT_DEFS.D_HID],
-        FM_DEFS.N_LAYERS: model_configs[SCGPT_DEFS.NLAYERS],
-        FM_DEFS.N_HEADS: model_configs[SCGPT_DEFS.NHEAD]
-    }
+    return format_base_metadata(
+        model_name=SCGPT_DEFS.MODEL_NAME,
+        n_genes=n_genes,
+        n_vocab=len(vocab),
+        vocab_list=vocab_list,
+        embed_dim=model_configs[SCGPT_DEFS.D_HID],
+        n_layers=model_configs[SCGPT_DEFS.NLAYERS],
+        n_heads=model_configs[SCGPT_DEFS.NHEAD],
+    )
 
 def load_gene_annotations(annotations_path) -> pd.DataFrame:
 
@@ -254,7 +261,9 @@ def load_gene_annotations(annotations_path) -> pd.DataFrame:
         .drop(columns = ["feature_length", "soma_joinid"])
     )
 
-def extract_model_weights(model, vocab, model_metadata, checkpoint_path) -> FoundationModelWeights:
+@require_scgpt
+@require_torchtext
+def extract_model_weights(model: TransformerModel, vocab: Vocab, model_metadata: dict, checkpoint_path: str) -> FoundationModelWeights:
     """
     Extract gene embeddings and attention weights from the scGPT model.
     
@@ -322,9 +331,8 @@ def extract_model_weights(model, vocab, model_metadata, checkpoint_path) -> Foun
             )
         
         # Split QKV into separate matrices and convert to numpy
-        w_q = in_proj[:d, :].clone().cpu().detach().numpy()
-        w_k = in_proj[d:2*d, :].clone().cpu().detach().numpy()
-        w_v = in_proj[2*d:, :].clone().cpu().detach().numpy()
+        in_proj_np = in_proj.clone().cpu().detach().numpy()
+        w_q, w_k, w_v = split_qkv_weights(in_proj_np, d)
         w_o = out_proj.clone().cpu().detach().numpy()
         
         attention_layers.append(

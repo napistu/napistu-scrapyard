@@ -17,6 +17,12 @@ from napistu_torch.load.foundation_models import (
 )
 
 from AIDOCell import load_gene_annotations
+from etl_utils import (
+    create_and_save_foundation_model,
+    format_base_metadata,
+    split_qkv_weights,
+)
+from optional import require_modelgenerator
 
 logger = logging.getLogger(__name__)
 
@@ -33,54 +39,55 @@ N_HEADS = 12
 GENE_ENCOER = "gene"
 
 
+@require_modelgenerator
 def process_scfoundation(
+    output_dir: str,
     checkpoint_path: Optional[str] = None,
-    output_dir: Optional[str] = None,
     output_prefix: Optional[str] = None,
     cache_dir: Optional[str] = None,
-) -> FoundationModel:
+) -> None:
     """
-    Process scFoundation checkpoint and optionally save to disk.
+    Process scFoundation checkpoint and save to disk.
     
     Parameters
     ----------
+    output_dir : str
+        Directory to save processed model
     checkpoint_path : str, optional
         Path to local checkpoint. If None, downloads from HuggingFace.
-    output_dir : str, optional
-        Directory to save processed model. If None, doesn't save.
     output_prefix : str, optional
-        Prefix for output files (default: "scFoundation_{variant}")
+        Prefix for output files (default: FOUNDATION_MODEL_NAMES.SCFOUNDATION)
     cache_dir : str, optional
         Cache directory for HuggingFace downloads
         
     Returns
     -------
-    FoundationModel
-        Processed model instance
+    None
         
     Examples
     --------
-    >>> # Download and process (don't save)
-    >>> model = process_scfoundation()
-    >>>
     >>> # Download and save
-    >>> model = process_scfoundation(output_dir="./models")
+    >>> process_scfoundation(output_dir="./models")
     >>>
     >>> # Process local file
-    >>> model = process_scfoundation(
-    ...     checkpoint_path="./models.ckpt",
-    ...     output_dir="./models"
+    >>> process_scfoundation(
+    ...     output_dir="./models",
+    ...     checkpoint_path="./models.ckpt"
     ... )
     """
     
+    logger.info(f"Extracting: scFoundation")
+    
     # Download checkpoint if needed
     if checkpoint_path is None:
-        logger.info(f"Downloading scFoundation checkpoint from HuggingFace...")
+        logger.info("\n1. Downloading checkpoint from HuggingFace...")
         checkpoint_path = hf_hub_download(
             repo_id=REPO_ID,
             filename=CHECKPOINT_FILE,
             cache_dir=cache_dir,
         )
+    else:
+        logger.info("\n1. Loading checkpoint...")
     
     # Load checkpoint
     logger.info(f"Loading scFoundation checkpoint (gene encoder: {GENE_ENCOER})")
@@ -95,25 +102,24 @@ def process_scfoundation(
     checkpoint = full_checkpoint[GENE_ENCOER]
     
     # Extract components
+    logger.info("2. Extracting weights...")
     gene_annotations = load_gene_annotations()
     weights = extract_weights(checkpoint)
     metadata = extract_metadata(checkpoint, gene_annotations)
+    logger.info(f"   {len(gene_annotations)} genes, {metadata[FM_DEFS.N_LAYERS]} layers")
+    logger.info(f"   Embeddings: {weights.gene_embedding.shape}")
+    logger.info(f"   Attention weights: {metadata[FM_DEFS.N_LAYERS]} layers × 4 matrices (Q,K,V,O)")
     
-    # Build model
-    model = FoundationModel(
-        weights=weights,
-        gene_annotations=gene_annotations,
-        model_metadata=metadata,
+    # Set default prefix if not provided
+    if output_prefix is None:
+        output_prefix = FOUNDATION_MODEL_NAMES.SCFOUNDATION
+    
+    # Build model and save
+    create_and_save_foundation_model(
+        weights, gene_annotations, metadata, output_dir, output_prefix
     )
     
-    # Save if requested
-    if output_dir is not None:
-        if output_prefix is None:
-            output_prefix = FOUNDATION_MODEL_NAMES.SCFOUNDATION
-        logger.info(f"Saving to {output_dir}/{output_prefix}")
-        model.save(output_dir, output_prefix)
-    
-    return model
+    return None
 
 
 # ============================================================================
@@ -155,9 +161,7 @@ def extract_weights(checkpoint: dict) -> FoundationModelWeights:
         out_proj = state_dict[out_proj_key].cpu().numpy()
         
         # Split combined QKV (shape: [3*embed_dim, embed_dim])
-        w_q = in_proj[:EMBED_DIM, :]
-        w_k = in_proj[EMBED_DIM : 2 * EMBED_DIM, :]
-        w_v = in_proj[2 * EMBED_DIM :, :]
+        w_q, w_k, w_v = split_qkv_weights(in_proj, EMBED_DIM)
         
         attention_layers.append(
             AttentionLayer(
@@ -209,13 +213,13 @@ def extract_metadata(
     n_genes = len(gene_annotations)
     vocab_list = gene_annotations[FM_DEFS.VOCAB_NAME].tolist()
     
-    return {
-        FM_DEFS.MODEL_NAME: FOUNDATION_MODEL_NAMES.SCFOUNDATION,
-        FM_DEFS.N_GENES: n_genes,
-        FM_DEFS.N_VOCAB: n_genes,
-        FM_DEFS.ORDERED_VOCABULARY: vocab_list,
-        FM_DEFS.EMBED_DIM: encoder_config["hidden_dim"],
-        FM_DEFS.N_LAYERS: encoder_config["depth"],
-        FM_DEFS.N_HEADS: encoder_config["heads"],
-    }
+    return format_base_metadata(
+        model_name=FOUNDATION_MODEL_NAMES.SCFOUNDATION,
+        n_genes=n_genes,
+        n_vocab=n_genes,
+        vocab_list=vocab_list,
+        embed_dim=encoder_config["hidden_dim"],
+        n_layers=encoder_config["depth"],
+        n_heads=encoder_config["heads"],
+    )
 
