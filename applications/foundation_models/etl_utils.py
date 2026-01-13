@@ -25,6 +25,7 @@ MODELS = SimpleNamespace(
     AIDOCELL = "AIDOCell",
     SCPRINT = "scPRINT",
     SCGPT = "scGPT",
+    SCFOUNDATION = "scFoundation",
 )
 
 AIDOCELL_CLASSES = SimpleNamespace(
@@ -50,6 +51,7 @@ RESULTS_DEFS = SimpleNamespace(
     # model metadata
     MODEL_METADATA = "model_metadata",
     MODEL_NAME = "model_name",
+    MODEL_VARIANT = "model_variant",
     N_GENES = "n_genes",
     N_VOCAB = "n_vocab",
     ORDERED_VOCABULARY = "ordered_vocabulary",

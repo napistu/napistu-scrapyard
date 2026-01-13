@@ -2,7 +2,6 @@ This directory contains ETL workflows for pulling Napistu-relevant summaries out
 
 Each model has a separate environment setup process, a model-specific utility .py file, and there is a shared .py file for common cross-model logic and definitions.
 
-
 ## scGPT
 
 venv's didn't work because the torchtext wheel is not compatible with torch, so i went with conda. 
@@ -15,8 +14,9 @@ Following the instructions on the [scGPT](https://github.com/bowang-lab/scGPT?ta
 
 ```bash
 # conda setup since torchtext is brittle
-brew install miniforge
-conda init zsh
+# brew install miniforge
+# conda init zsh
+# mamba shell init --shell zsh
 mamba create -n scgpt python=3.11
 mamba activate scgpt
 
@@ -26,9 +26,10 @@ mamba install pytorch torchtext==0.18.0 -c pytorch -c conda-forge
 # Install the rest
 pip install scgpt wandb gseapy ipykernel napistu
 python -m ipykernel install --user --name=scGPT
+
 ```
 
-## AIDO.Cell
+## AIDO.Cell / scFoundation
 
 https://github.com/genbio-ai/ModelGenerator is a package for downloading and working with the AIDO models
 
@@ -36,9 +37,7 @@ https://github.com/genbio-ai/ModelGenerator is a package for downloading and wor
 uv venv .aido
 source .aido/bin/activate
 
-uv pip install modelgenerator
-uv pip install ipykernel
-
+uv pip install modelgenerator ipykernel "napistu-torch>=0.3.8"
 python -m ipykernel install --user --name=AIDO.Cell
 ```
 
@@ -48,15 +47,31 @@ https://virtualcellmodels.cziscience.com/model/scprint
 https://github.com/cantinilab/scPRINT
 
 ```bash
-uv venv .scprint --python 3.10
-source .scprint/bin/activate
-#one of
-uv pip install scprint 
+uv venv .scprint311 --python 3.11
+source .scprint311/bin/activate
 
-uv pip install ipykernel
+uv pip install scprint ipykernel "napistu-torch>=0.3.8"
 python -m ipykernel install --user --name=scPRINT
 
 lamin init --storage data/lamin_db --name scPRINT_lamin --modules bionty
 ```
 
+## Pan-model environment (doesn't work)
 
+Ideally, these models could be processed in a common environment but there are conflicting dependencies so 
+
+```bash
+# conda setup since torchtext is brittle
+# brew install miniforge
+# conda init zsh
+# mamba shell init --shell zsh
+mamba create -n fm_etl python=3.11
+mamba activate fm_etl
+
+# Install PyTorch and torchtext (from conda-forge, NOT Anaconda)
+mamba install pytorch torchtext==0.18.0 -c pytorch -c conda-forge
+
+# Install the rest
+pip install scgpt scprint modelgenerator wandb gseapy ipykernel "napistu-torch>=0.3.8"
+python -m ipykernel install --user --name="Foundation Model ETL"
+```

@@ -1,30 +1,34 @@
 """ Utilities for ETLing the AIDOCell foundation model. """
 
-import json
 import logging
 import numpy as np
 import os
 import pandas as pd
 import torch
 from types import SimpleNamespace
+from typing import List
 
 import modelgenerator.cell.utils as cell_utils
 
-# local .py file
-from etl_utils import (
-    create_adocell_prefix,
-    save_results,
-    MODELS,
-    ONTOLOGIES,
-    RESULTS_DEFS,
+# Import from napistu_torch
+from napistu.constants import ONTOLOGIES
+from napistu_torch.load.constants import (
+    FM_DEFS,
+    FOUNDATION_MODEL_NAMES,
+)
+from napistu_torch.load.foundation_models import (
+    AttentionLayer,
+    FoundationModel,
+    FoundationModelWeights,
 )
 
 logger = logging.getLogger(__name__)
 
 AIDOCELL_DEFS = SimpleNamespace(
-    MODEL_NAME = MODELS.AIDOCELL,
+    MODEL_NAME = FOUNDATION_MODEL_NAMES.AIDOCELL,
     # files
     GENE_FILE = "gene_lists/OS_scRNA_gene_index.19264.tsv",
+    PREFIX_TEMPLATE = "{model_name}_{model_class_name}",
     # parameters
     EMBED_DIM = "embed_dim",
     N_LAYERS = "n_layers",
@@ -51,24 +55,29 @@ def process_model(model_class, output_dir) -> None:
     """
 
     model_class_name = model_class.__name__
-    file_prefix = create_adocell_prefix(model_class_name)
+    file_prefix = AIDOCELL_DEFS.PREFIX_TEMPLATE.format(model_name=AIDOCELL_DEFS.MODEL_NAME, model_class_name=model_class_name)
     
     logger.info(f"Extracting: {model_class_name}")
     
     # 1. Load model and data
     logger.info("\n1. Loading model and data...")
     model, gene_annotations, model_metadata = load_aidocell(model_class)
-    logger.info(f"   {len(gene_annotations)} genes, {model_metadata['n_layers']} layers")
+    logger.info(f"   {len(gene_annotations)} genes, {model_metadata[FM_DEFS.N_LAYERS]} layers")
 
     # 2. Extract weights
     logger.info("2. Extracting weights...")
-    weights_dict = extract_model_weights(model)
-    logger.info(f"   Embeddings: {weights_dict['gene_embedding'].shape}")
-    logger.info(f"   Attention weights: {model_metadata['n_layers']} layers × 4 matrices (Q,K,V,O)")
+    weights = extract_model_weights(model)
+    logger.info(f"   Embeddings: {weights.gene_embedding.shape}")
+    logger.info(f"   Attention weights: {model_metadata[FM_DEFS.N_LAYERS]} layers × 4 matrices (Q,K,V,O)")
 
-    # 3. Save results
-    logger.info("3. Saving results...")
-    save_results(weights_dict, gene_annotations, model_metadata, output_dir, file_prefix)
+    # 3. Create FoundationModel and save
+    logger.info("3. Creating FoundationModel and saving...")
+    foundation_model = FoundationModel(
+        weights=weights,
+        gene_annotations=gene_annotations,
+        model_metadata=model_metadata,
+    )
+    foundation_model.save(output_dir, file_prefix)
     logger.info("   Successfully saved all results!")
 
     return None
@@ -121,7 +130,7 @@ def load_gene_annotations():
     
     # Create the mapping table
     gene_table = pd.DataFrame({
-        RESULTS_DEFS.VOCAB_NAME: gene_symbols,
+        FM_DEFS.VOCAB_NAME: gene_symbols,
         ONTOLOGIES.SYMBOL: gene_symbols,
         ONTOLOGIES.ENSEMBL_GENE: [gene_map.get(x, f'{x}_unknown_ensg') for x in gene_symbols]
     })
@@ -129,9 +138,9 @@ def load_gene_annotations():
     return gene_table
 
 
-def _extract_attention_weights(model):
+def _extract_attention_weights(model) -> List[AttentionLayer]:
     """
-    Extract core attention weights (Q, K, V, O) from all layers
+    Extract core attention weights (Q, K, V, O) from all layers as AttentionLayer instances
     
     Parameters
     ----------
@@ -140,10 +149,10 @@ def _extract_attention_weights(model):
         
     Returns
     -------
-    dict
-        Dictionary with attention weights by layer
+    List[AttentionLayer]
+        List of AttentionLayer instances
     """
-    attention_weights = {}
+    attention_layers = []
     encoder = model.encoder
     transformer_layers = encoder.encoder.layer
     n_layers = model.get_num_layer()
@@ -153,17 +162,20 @@ def _extract_attention_weights(model):
         attention_self = layer.attention.self
         attention_output = layer.attention.output
         
-        attention_weights[RESULTS_DEFS.LAYER_NAME_TEMPLATE.format(layer_idx=layer_idx)] = {
-            RESULTS_DEFS.W_Q: attention_self.query.weight.detach().cpu().numpy(),
-            RESULTS_DEFS.W_K: attention_self.key.weight.detach().cpu().numpy(),
-            RESULTS_DEFS.W_V: attention_self.value.weight.detach().cpu().numpy(),
-            RESULTS_DEFS.W_O: attention_output.dense.weight.detach().cpu().numpy(),
-        }
+        attention_layers.append(
+            AttentionLayer(
+                layer_idx=layer_idx,
+                W_q=attention_self.query.weight.detach().cpu().numpy(),
+                W_k=attention_self.key.weight.detach().cpu().numpy(),
+                W_v=attention_self.value.weight.detach().cpu().numpy(),
+                W_o=attention_output.dense.weight.detach().cpu().numpy(),
+            )
+        )
     
-    return attention_weights
+    return attention_layers
 
 
-def extract_model_weights(model):
+def extract_model_weights(model) -> FoundationModelWeights:
     """
     Extract model weights in the standardized format
     
@@ -174,8 +186,8 @@ def extract_model_weights(model):
         
     Returns
     -------
-    dict
-        Dictionary containing gene_embedding and attention_weights
+    FoundationModelWeights
+        FoundationModelWeights instance containing gene_embedding and attention_layers
     """
     
     # Extract gene embeddings
@@ -186,16 +198,16 @@ def extract_model_weights(model):
         gene_positions = torch.arange(n_genes)
         gene_embedding = encoder.position_embedding(gene_positions).cpu().numpy()
     
-    # Extract attention weights
-    attention_weights = _extract_attention_weights(model)
+    # Extract attention weights as AttentionLayer instances
+    attention_layers = _extract_attention_weights(model)
     
-    return {
-        RESULTS_DEFS.GENE_EMBEDDING: gene_embedding,
-        RESULTS_DEFS.ATTENTION_WEIGHTS: attention_weights
-    }
+    return FoundationModelWeights(
+        gene_embedding=gene_embedding,
+        attention_layers=attention_layers,
+    )
 
 
-def _format_model_metadata(model):
+def _format_model_metadata(model, model_class_name):
     """
     Extract model architecture metadata
     
@@ -214,16 +226,17 @@ def _format_model_metadata(model):
     n_genes = len(gene_annotations)
     
     # Get vocabulary as list of gene symbols (AIDOCell doesn't have special tokens)
-    vocab_list = gene_annotations[RESULTS_DEFS.VOCAB_NAME].tolist()
+    vocab_list = gene_annotations[FM_DEFS.VOCAB_NAME].tolist()
     
     return {
-        RESULTS_DEFS.MODEL_NAME: AIDOCELL_DEFS.MODEL_NAME,
-        RESULTS_DEFS.N_GENES: n_genes,
-        RESULTS_DEFS.N_VOCAB: n_genes,  # Same as n_genes for AIDOCell (no special tokens)
-        RESULTS_DEFS.ORDERED_VOCABULARY: vocab_list,
-        RESULTS_DEFS.EMBED_DIM: int(model.get_embedding_size()),
-        RESULTS_DEFS.N_LAYERS: int(model.get_num_layer()),
-        RESULTS_DEFS.N_HEADS: int(encoder.config.num_attention_heads),
+        FM_DEFS.MODEL_NAME: AIDOCELL_DEFS.MODEL_NAME,
+        FM_DEFS.MODEL_VARIANT: model_class_name,
+        FM_DEFS.N_GENES: n_genes,
+        FM_DEFS.N_VOCAB: n_genes,  # Same as n_genes for AIDOCell (no special tokens)
+        FM_DEFS.ORDERED_VOCABULARY: vocab_list,
+        FM_DEFS.EMBED_DIM: int(model.get_embedding_size()),
+        FM_DEFS.N_LAYERS: int(model.get_num_layer()),
+        FM_DEFS.N_HEADS: int(encoder.config.num_attention_heads),
         # Additional AIDOCell-specific metadata
         AIDOCELL_DEFS.HIDDEN_DIM: int(encoder.config.hidden_size),
     }
@@ -255,6 +268,6 @@ def load_aidocell(model_class):
     gene_annotations = load_gene_annotations()
     
     logger.info("Formatting model metadata")
-    model_metadata = _format_model_metadata(model)
+    model_metadata = _format_model_metadata(model, model_class_name = model_class.__name__)
     
     return model, gene_annotations, model_metadata
