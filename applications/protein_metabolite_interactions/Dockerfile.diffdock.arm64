@@ -1,0 +1,86 @@
+# Multi-architecture DiffDock Dockerfile
+# Supports: linux/arm64 (Mac M-series), linux/amd64 (x86_64)
+# GPU Support: None (CPU only for Mac compatibility)
+
+ARG TARGETPLATFORM
+FROM --platform=${TARGETPLATFORM} python:3.11-slim
+
+# ============================================================================
+# DiffDock Configuration - Update these when new versions are released
+# ============================================================================
+# DiffDock repository and version
+ARG DIFFDOCK_REPO=https://github.com/gcorso/DiffDock.git
+ARG DIFFDOCK_VERSION=v1.1
+# ============================================================================
+
+# Build argument to identify platform
+ARG TARGETARCH
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    wget \
+    unzip \
+    libxrender1 \
+    libxext6 \
+    libsm6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Clone DiffDock repository
+RUN git clone ${DIFFDOCK_REPO} . && \
+    echo "Building for architecture: ${TARGETARCH}"
+
+# Install PyTorch CPU-only (compatible with both ARM64 and AMD64)
+RUN pip install --no-cache-dir \
+    torch \
+    torchvision \
+    torchaudio \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# Install scientific dependencies
+RUN pip install --no-cache-dir \
+    numpy \
+    scipy \
+    pandas \
+    biopython \
+    networkx \
+    pyyaml \
+    tqdm
+
+# Install cheminformatics packages
+RUN pip install --no-cache-dir rdkit || pip install --no-cache-dir rdkit-pypi
+
+# Install geometric deep learning dependencies
+RUN pip install --no-cache-dir \
+    torch-scatter \
+    torch-sparse \
+    torch-cluster \
+    torch-spline-conv \
+    torch-geometric \
+    e3nn
+
+# Install additional DiffDock dependencies
+RUN pip install --no-cache-dir \
+    spyrmsd \
+    biopandas \
+    fair-esm \
+    prody
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DEVICE=cpu
+
+# run a warmup to save weights
+RUN python -m inference \
+    --protein_path pdb_00001crn \
+    --ligand_description "CC(=O)C(=O)[O-]" \
+    --inference_steps 1 --samples_per_complex 1 --actual_steps 1 \
+    --out_dir /tmp/warmup && \
+    rm -rf /tmp/warmup
+
+# Entry point for running inference
+ENTRYPOINT ["python", "-m", "inference"]
+CMD ["--help"]
