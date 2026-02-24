@@ -6,7 +6,6 @@ These notebook's functions are organized in the *Napistu-Torch*'s `load` subpack
 - foundation_model_etl.py contains *process_* functions which format models weights as  `napistu_torch.load.foundation_model.FoundationModel` instances
 - model-specific dependencies are handled with decorators and runtime requirements
 
-
 ## Foundation model ingestion
 
 This notebook demonstrates how to ingest the gene embeddings and attention patterns from multiple Virtual Cell Foundation Models into a common format. The models considered here are:
@@ -15,7 +14,6 @@ This notebook demonstrates how to ingest the gene embeddings and attention patte
 - scPRINT (3 versions)
 - scFoundation ()
 - scGPT (scGPT.ipynb)
-
 
 ## scGPT
 
