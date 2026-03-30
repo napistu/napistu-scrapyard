@@ -6,7 +6,6 @@ These notebook's functions are organized in the *Napistu-Torch*'s `load` subpack
 - foundation_model_etl.py contains *process_* functions which format models weights as  `napistu_torch.load.foundation_model.FoundationModel` instances
 - model-specific dependencies are handled with decorators and runtime requirements
 
-
 ## Foundation model ingestion
 
 This notebook demonstrates how to ingest the gene embeddings and attention patterns from multiple Virtual Cell Foundation Models into a common format. The models considered here are:
@@ -15,10 +14,6 @@ This notebook demonstrates how to ingest the gene embeddings and attention patte
 - scPRINT (3 versions)
 - scFoundation ()
 - scGPT (scGPT.ipynb)
-
-
-
-
 
 ## scGPT
 
@@ -30,7 +25,7 @@ Following the instructions on the [scGPT](https://github.com/bowang-lab/scGPT?ta
 
 **Quick install (pip):**
 ```bash
-pip install scgpt wandb gseapy ipykernel "napistu-torch>=0.3.8"
+pip install scgpt wandb gseapy ipykernel "napistu-torch>=0.3.10"
 ```
 
 **Note:** If you encounter issues with `torchtext` compatibility (common with PyTorch), use the conda/mamba setup below.
@@ -51,7 +46,7 @@ mamba activate scgpt
 mamba install pytorch torchtext==0.18.0 -c pytorch -c conda-forge
 
 # Install the rest
-pip install scgpt wandb gseapy ipykernel "napistu-torch>=0.3.8"
+pip install scgpt wandb gseapy ipykernel "napistu-torch>=0.3.10"
 python -m ipykernel install --user --name=scGPT 
 ```
 
@@ -83,7 +78,7 @@ https://github.com/cantinilab/scPRINT
 uv venv .scprint --python 3.11
 source .scprint/bin/activate
 
-uv pip install scprint ipykernel "napistu-torch>=0.3.8"
+uv pip install scprint ipykernel "napistu-torch>=0.3.10"
 python -m ipykernel install --user --name=scPRINT
 
 # Initialize lamin database for gene annotations (optional but recommended)
