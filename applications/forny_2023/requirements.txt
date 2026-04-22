@@ -9,4 +9,5 @@ seaborn==0.*
 # multiomic factor analysis
 muon==0.1.*
 mofapy2==0.7.*
+plotnine
 ipykernel
