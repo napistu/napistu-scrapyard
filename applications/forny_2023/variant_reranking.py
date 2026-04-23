@@ -567,7 +567,7 @@ dat_new_hits = (dat_hits.query(f'{V.known_gene}.isna()')
 (dat_new_hits    .query(f'{V.exomiser_pipeline} == "genomiser"')
     
 .pivot_table(index=[V.sample_id], values=V.exomiser_id, columns=V.re_rank, aggfunc=list)
-)
+).head(5)
 
 # %% [markdown]
 # MMA 153 -> SUCLG1
